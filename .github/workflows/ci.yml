@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Import check
+        run: uv run python -c "import mergeguard; print('✓ mergeguard imports cleanly')"
+
+      - name: Tool schema sync assertion
+        run: |
+          uv run python -c "
+          from mergeguard.tools import PLANNER_TOOLS, REVIEWER_TOOLS
+          import inspect
+          from mergeguard.main import _fetch_pr_diff, _list_changed_files, _read_file, _check_style
+
+          # Map tool schema names to implementation functions
+          schema_names = set()
+          for tool in PLANNER_TOOLS + REVIEWER_TOOLS:
+              if tool.get('type') == 'function':
+                  schema_names.add(tool['function']['name'])
+
+          expected = {'fetch_pr_diff', 'list_changed_files', 'read_file', 'check_style'}
+          assert schema_names == expected, f'Tool schema mismatch: {schema_names} != {expected}'
+          print(f'✓ {len(schema_names)} tool schemas match registered functions')
+          "
+
+      - name: Schema validation
+        run: |
+          uv run python -c "
+          from mergeguard.schemas import ReviewReport
+          schema = ReviewReport.model_json_schema()
+          assert 'properties' in schema, 'ReviewReport schema missing properties'
+          print(f'✓ ReviewReport schema valid: {len(schema[\"properties\"])} fields')
+          "
