@@ -20,7 +20,7 @@ MergeGuard is a 4-agent pipeline that performs automated code review on GitHub P
 
 **Role:** Perform detailed code review on each changed file.
 
-- **Model:** `devstral-latest` (code-specialized)
+- **Model:** `devstral-2512` (code-specialized frontier model)
 - **Tools:** `read_file` (function), `check_style` (function)
 - **Input:** Review plan from Planner
 - **Output:** List of review comments (file, line, severity, message, suggestion)
@@ -30,7 +30,7 @@ MergeGuard is a 4-agent pipeline that performs automated code review on GitHub P
 
 **Role:** Validate the Reviewer's suggestions by running code analysis.
 
-- **Model:** `devstral-latest`
+- **Model:** `devstral-2512`
 - **Tools:** `code_interpreter` (built-in)
 - **Input:** Review comments from Reviewer
 - **Output:** Verified comments — each marked as confirmed/rejected with evidence
@@ -48,7 +48,7 @@ The Verifier uses code_interpreter to:
 
 - **Model:** `mistral-large-latest`
 - **Tools:** None (output only)
-- **Output format:** Structured JSON via `response_format` with JSON schema
+- **Output format:** Structured JSON via `CompletionArgs(response_format=...)` with JSON schema
 - **Input:** Verified comments from Verifier
 - **Output:** `ReviewReport` JSON — summary, scored comments, overall score, recommendation
 
@@ -81,40 +81,45 @@ User Input (PR URL)
    ReviewReport JSON
 ```
 
+## Conversation Execution (RunContext)
+
+The pipeline uses Mistral's `RunContext` + `run_async` pattern for automatic
+function-call execution and multi-agent handoffs:
+
+```python
+from mistralai.extra.run.context import RunContext
+
+async with RunContext(agent_id=chain.entry_agent_id) as run_ctx:
+    @run_ctx.register_func
+    def fetch_pr_diff(owner: str, repo: str, pr_number: int) -> str:
+        """Fetch PR diff from GitHub."""
+        # Real implementation using httpx + GitHub API
+        ...
+
+    run_result = await client.beta.conversations.run_async(
+        run_ctx=run_ctx, inputs=user_message
+    )
+```
+
+The SDK automatically:
+1. Sends the user message to the entry agent (Planner)
+2. Intercepts function call requests and executes registered functions
+3. Returns function results to the agent
+4. Follows handoff instructions to the next agent in the chain
+5. Repeats until the terminal agent (Reporter) produces final output
+
 ## Mistral API Usage
 
 ### Agent Creation
 ```python
-agent = client.beta.agents.create(
-    model="mistral-large-latest",
-    name="Planner",
-    instructions="...",  # loaded from agents/planner.md
-    tools=[{
-        "type": "function",
-        "function": {
-            "name": "fetch_pr_diff",
-            "description": "Fetch the diff for a GitHub PR",
-            "parameters": { ... }
-        }
-    }],
-    completion_args={"temperature": 0.3}
-)
-```
+from mistralai import CompletionArgs, ResponseFormat, JSONSchema
 
-### Handoff Setup
-```python
-# After creating all agents:
-client.beta.agents.update(
-    agent_id=planner.id,
-    handoffs=[reviewer.id]
-)
-client.beta.agents.update(
-    agent_id=reviewer.id,
-    handoffs=[verifier.id]
-)
-client.beta.agents.update(
-    agent_id=verifier.id,
-    handoffs=[reporter.id]
+agent = client.beta.agents.create(
+    model="devstral-2512",
+    name="Reviewer",
+    instructions="...",
+    tools=[...],
+    completion_args=CompletionArgs(temperature=0.3)
 )
 ```
 
@@ -124,14 +129,24 @@ reporter = client.beta.agents.create(
     model="mistral-large-latest",
     name="Reporter",
     instructions="...",
-    response_format={
-        "type": "json_schema",
-        "json_schema": {
-            "name": "ReviewReport",
-            "schema": { ... }  # from schemas.py
-        }
-    }
+    completion_args=CompletionArgs(
+        temperature=0.1,
+        response_format=ResponseFormat(
+            type="json_schema",
+            json_schema=JSONSchema(
+                name="ReviewReport",
+                schema=ReviewReport.model_json_schema(),
+            )
+        )
+    )
 )
+```
+
+### Handoff Setup
+```python
+client.beta.agents.update(agent_id=planner.id, handoffs=[reviewer.id])
+client.beta.agents.update(agent_id=reviewer.id, handoffs=[verifier.id])
+client.beta.agents.update(agent_id=verifier.id, handoffs=[reporter.id])
 ```
 
 ## Differentiation
@@ -139,7 +154,7 @@ reporter = client.beta.agents.create(
 What makes MergeGuard stand out from typical chatbot submissions:
 
 1. **Real-world utility** — solves actual PR review bottleneck that every dev team faces
-2. **Deep Agents API usage** — uses 6+ Mistral features (Agents, Handoffs, Function Calling, Code Interpreter, Structured Output, Devstral)
+2. **Deep Agents API usage** — uses 7+ Mistral features (Agents, Handoffs, Function Calling, Code Interpreter, Structured Output, Devstral, RunContext)
 3. **Verifier agent** — unique validation step that catches false positives, demonstrating agent self-correction
 4. **Structured output** — machine-readable JSON report, not just chat text
 5. **Dev-tool judges love** — judges are developers who immediately understand the value

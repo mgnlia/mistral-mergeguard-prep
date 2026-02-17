@@ -3,16 +3,41 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import re
 import sys
 
+import httpx
 from rich.console import Console
 from rich.panel import Panel
 from rich.syntax import Syntax
 
 console = Console()
+
+# ── GitHub API helper ──────────────────────────────────────────────────
+
+_github_client: httpx.Client | None = None
+
+
+def _gh_client() -> httpx.Client:
+    """Lazy-init an httpx client with GITHUB_TOKEN auth (if available)."""
+    global _github_client
+    if _github_client is None:
+        headers = {"Accept": "application/vnd.github.v3+json"}
+        token = os.environ.get("GITHUB_TOKEN")
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        _github_client = httpx.Client(
+            base_url="https://api.github.com",
+            headers=headers,
+            timeout=30.0,
+        )
+    return _github_client
+
+
+# ── PR URL parsing ─────────────────────────────────────────────────────
 
 
 def parse_pr_url(url: str) -> tuple[str, str, int]:
@@ -27,12 +52,83 @@ def parse_pr_url(url: str) -> tuple[str, str, int]:
     return match.group(1), match.group(2), int(match.group(3))
 
 
-def run_review(pr_url: str) -> dict:
+# ── Tool implementations ──────────────────────────────────────────────
+
+
+def _fetch_pr_diff(owner: str, repo: str, pr_number: int) -> str:
+    """Fetch the unified diff for a GitHub Pull Request."""
+    gh = _gh_client()
+    resp = gh.get(
+        f"/repos/{owner}/{repo}/pulls/{pr_number}",
+        headers={"Accept": "application/vnd.github.v3.diff"},
+    )
+    if resp.status_code == 200:
+        return resp.text
+    return json.dumps({"error": f"GitHub API returned {resp.status_code}", "body": resp.text[:500]})
+
+
+def _list_changed_files(owner: str, repo: str, pr_number: int) -> str:
+    """List all files changed in a GitHub Pull Request."""
+    gh = _gh_client()
+    resp = gh.get(f"/repos/{owner}/{repo}/pulls/{pr_number}/files")
+    if resp.status_code == 200:
+        files = [
+            {
+                "filename": f["filename"],
+                "status": f["status"],
+                "additions": f["additions"],
+                "deletions": f["deletions"],
+                "changes": f["changes"],
+            }
+            for f in resp.json()
+        ]
+        return json.dumps(files)
+    return json.dumps({"error": f"GitHub API returned {resp.status_code}"})
+
+
+def _read_file(owner: str, repo: str, path: str, ref: str) -> str:
+    """Read the full content of a file from a specific ref."""
+    gh = _gh_client()
+    resp = gh.get(
+        f"/repos/{owner}/{repo}/contents/{path}",
+        params={"ref": ref},
+        headers={"Accept": "application/vnd.github.v3.raw"},
+    )
+    if resp.status_code == 200:
+        return resp.text
+    return json.dumps({"error": f"GitHub API returned {resp.status_code}"})
+
+
+def _check_style(code: str, language: str) -> str:
+    """Run basic style checks on a code snippet."""
+    issues: list[dict] = []
+    if language == "python":
+        import ast
+
+        try:
+            ast.parse(code)
+        except SyntaxError as e:
+            issues.append({"type": "syntax_error", "message": str(e), "line": e.lineno})
+        # Basic checks
+        for i, line in enumerate(code.splitlines(), 1):
+            if len(line) > 120:
+                issues.append({"type": "line_too_long", "line": i, "length": len(line)})
+    return json.dumps({"language": language, "issues": issues, "count": len(issues)})
+
+
+# ── Review pipeline (async with RunContext) ────────────────────────────
+
+
+async def run_review_async(pr_url: str) -> dict:
     """Run the full MergeGuard review pipeline on a PR.
+
+    Uses the Mistral RunContext + run_async pattern for function-call
+    execution and multi-agent handoffs.
 
     Returns the ReviewReport as a dict.
     """
     from mistralai import Mistral
+    from mistralai.extra.run.context import RunContext
 
     from mergeguard.handoffs import build_chain, teardown_chain
 
@@ -62,30 +158,89 @@ def run_review(pr_url: str) -> dict:
     )
 
     try:
-        # Start conversation with the Planner (entry agent)
+        # Start conversation with the Planner (entry agent) using RunContext
         console.print("[bold]Starting review...[/]\n")
 
-        # TODO: During hackathon sprint, implement:
-        # 1. Create a conversation with the entry agent
-        # 2. Send the PR URL as user message
-        # 3. Handle function call responses (fetch_pr_diff, etc.)
-        # 4. Follow handoffs through the chain
-        # 5. Collect final structured output from Reporter
-
-        # Placeholder — will be implemented during the hackathon
-        response = client.beta.conversations.create(
-            agent_id=chain.entry_agent_id,
-            inputs=f"Please review this Pull Request: https://github.com/{owner}/{repo}/pull/{pr_number}",
+        user_message = (
+            f"Please review this Pull Request: "
+            f"https://github.com/{owner}/{repo}/pull/{pr_number}"
         )
 
+        async with RunContext(agent_id=chain.entry_agent_id) as run_ctx:
+            # Register all function tools so the SDK can execute them
+            # when agents invoke tool calls during the conversation.
+
+            @run_ctx.register_func
+            def fetch_pr_diff(owner: str, repo: str, pr_number: int) -> str:
+                """Fetch the unified diff for a GitHub Pull Request.
+
+                Args:
+                    owner: Repository owner (user or org).
+                    repo: Repository name.
+                    pr_number: Pull request number.
+                """
+                console.print(f"  [dim]→ fetch_pr_diff({owner}/{repo}#{pr_number})[/]")
+                return _fetch_pr_diff(owner, repo, pr_number)
+
+            @run_ctx.register_func
+            def list_changed_files(owner: str, repo: str, pr_number: int) -> str:
+                """List all files changed in a GitHub Pull Request.
+
+                Args:
+                    owner: Repository owner (user or org).
+                    repo: Repository name.
+                    pr_number: Pull request number.
+                """
+                console.print(f"  [dim]→ list_changed_files({owner}/{repo}#{pr_number})[/]")
+                return _list_changed_files(owner, repo, pr_number)
+
+            @run_ctx.register_func
+            def read_file(owner: str, repo: str, path: str, ref: str) -> str:
+                """Read the full content of a file from the PR's head branch.
+
+                Args:
+                    owner: Repository owner.
+                    repo: Repository name.
+                    path: File path relative to repo root.
+                    ref: Git ref (branch, tag, or SHA).
+                """
+                console.print(f"  [dim]→ read_file({owner}/{repo}/{path}@{ref})[/]")
+                return _read_file(owner, repo, path, ref)
+
+            @run_ctx.register_func
+            def check_style(code: str, language: str) -> str:
+                """Run basic style checks on a code snippet.
+
+                Args:
+                    code: Code snippet to check.
+                    language: Programming language (python, javascript, etc.).
+                """
+                console.print(f"  [dim]→ check_style(lang={language}, {len(code)} chars)[/]")
+                return _check_style(code, language)
+
+            # Run the conversation — the SDK handles function call loops
+            # and handoffs between agents automatically.
+            run_result = await client.beta.conversations.run_async(
+                run_ctx=run_ctx,
+                inputs=user_message,
+            )
+
         # Parse the final JSON report from the Reporter
-        report = json.loads(response.outputs[-1].content)
+        report = json.loads(run_result.outputs[-1].content)
         return report
 
     finally:
         # Cleanup agents
         console.print("\n[dim]Cleaning up agents...[/]")
         teardown_chain(client, chain)
+
+
+def run_review(pr_url: str) -> dict:
+    """Synchronous wrapper around the async review pipeline."""
+    return asyncio.run(run_review_async(pr_url))
+
+
+# ── Display ────────────────────────────────────────────────────────────
 
 
 def display_report(report: dict) -> None:
@@ -130,6 +285,9 @@ def display_report(report: dict) -> None:
                 console.print(f"    [dim]→ {c['suggestion']}[/]")
     else:
         console.print("[green]No issues found — clean PR! 🎉[/]")
+
+
+# ── CLI ────────────────────────────────────────────────────────────────
 
 
 def main() -> None:
