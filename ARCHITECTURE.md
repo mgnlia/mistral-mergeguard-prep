@@ -1,363 +1,311 @@
-# MergeGuard — Multi-Agent Code Review Pipeline
-## Architecture Design Document (Pre-Hackathon Prep)
+# MergeGuard — Architecture Design Document
 
-> **IMPORTANT:** This is a design document only. All production code must be written during the 48h hackathon window (Feb 28–Mar 1, 2026).
+> **Status:** Pre-hackathon prep (design only, no production code)
+> **Event:** Mistral Worldwide Hackathon 2026 (Feb 28–Mar 1)
+> **Target Awards:** Best Use of Agent Skills + Online 1st Place / Global Winner
 
 ---
 
 ## 1. Overview
 
-MergeGuard is a multi-agent code review pipeline built on Mistral's Agents API with Handoffs. It automates the PR merge-quality gate with 4 specialized agents that plan, review, verify, and report on code changes.
-
-**Target Awards:**
-- "Best Use of Agent Skills" (primary)
-- Online 1st Place ($1,500 + $3,000 credits)
-- Global Winner ($10,000 + $15,000 credits)
-
----
-
-## 2. Agent Pipeline
+MergeGuard is a **multi-agent code review pipeline** that uses the Mistral Agents API with Handoffs to automatically review Pull Requests. It chains 4 specialized agents:
 
 ```
-PR Submitted
+PR Diff Input
     │
     ▼
-┌─────────────────┐
-│  PLANNER AGENT  │  mistral-large-latest
-│  Tools: web_search│  Decomposes PR into reviewable chunks
-│  Handoffs → Reviewer│  Assigns focus areas per file
-└────────┬────────┘
-         │ handoff
-         ▼
-┌─────────────────┐
-│  REVIEWER AGENT │  mistral-large-latest
-│  Tools: function_calling│  Line-by-line code analysis
-│  (get_file_context, get_blame)│  Produces structured review comments
-│  Handoffs → Verifier│
-└────────┬────────┘
-         │ handoff
-         ▼
-┌─────────────────┐
-│  VERIFIER AGENT │  devstral-latest
-│  Tools: code_interpreter│  Runs linting, type checks, tests
-│  Handoffs → Reporter│  Validates reviewer findings
-└────────┬────────┘
-         │ handoff
-         ▼
-┌─────────────────┐
-│  REPORTER AGENT │  mistral-large-latest
-│  Structured Output│  Aggregates all findings
-│  (JSON schema)  │  Produces merge/block verdict
-└─────────────────┘
-         │
-         ▼
-    Verdict JSON
-    (merge / block / request-changes)
+┌──────────┐    handoff    ┌──────────┐    handoff    ┌──────────┐    handoff    ┌──────────┐
+│ PLANNER  │──────────────▶│ REVIEWER  │──────────────▶│ VERIFIER │──────────────▶│ REPORTER │
+│ mistral- │               │ mistral-  │               │ devstral │               │ mistral- │
+│ large    │               │ large     │               │          │               │ large    │
+│          │               │           │               │          │               │          │
+│ Decomposes│              │ Line-by-  │               │ Runs     │               │ Structured│
+│ PR into  │               │ line code │               │ linting  │               │ JSON     │
+│ chunks   │               │ analysis  │               │ & tests  │               │ verdict  │
+└──────────┘               └──────────┘               └──────────┘               └──────────┘
+     │                          │                          │                          │
+  web_search              function_calling            code_interpreter          structured_output
+  (context)               (get_file_context,           (lint, test)            (ReviewVerdict)
+                           get_blame)
 ```
 
----
+## 2. Mistral Features Showcased
 
-## 3. Mistral Features Used (6+)
+| # | Feature | Where Used | Notes |
+|---|---------|-----------|-------|
+| 1 | **Agents API** (beta) | All 4 agents | `client.beta.agents.create()` |
+| 2 | **Handoffs** | Planner→Reviewer→Verifier→Reporter | Linear chain with `handoffs=[]` |
+| 3 | **Function Calling** | Reviewer agent | `get_file_context`, `get_blame` custom tools |
+| 4 | **Code Interpreter** | Verifier agent | Runs linting/test code in sandbox |
+| 5 | **Structured Output** | Reporter agent | `CompletionArgs(response_format=...)` |
+| 6 | **Web Search** | Planner agent | Looks up library docs, CVE databases |
+| 7 | **Devstral model** | Verifier agent | Code-specialized model for verification |
+| 8 | **Conversations API** | Pipeline orchestrator | `conversations.start()` / `conversations.append()` |
 
-| # | Feature | Agent | How Used |
-|---|---------|-------|----------|
-| 1 | **Agents API** (beta) | All | `client.beta.agents.create()` for each agent |
-| 2 | **Handoffs** | All | Chain: Planner→Reviewer→Verifier→Reporter |
-| 3 | **Function Calling** | Reviewer | Custom `get_file_context`, `get_blame`, `get_pr_diff` |
-| 4 | **Code Interpreter** | Verifier | Built-in tool for running linting/tests |
-| 5 | **Structured Output** | Reporter | JSON schema for verdict |
-| 6 | **Web Search** | Planner | Built-in tool for docs/context lookup |
-| 7 | **Devstral** | Verifier | Specialized coding model |
+**Total: 8 distinct Mistral features** — maximizes "Best Use of Agent Skills" scoring.
 
----
+## 3. Agent Configurations
 
-## 4. Agent Configurations
+### 3.1 Planner Agent
 
-### 4.1 Planner Agent
-```python
-planner = client.beta.agents.create(
-    model="mistral-large-latest",
-    name="mergeguard-planner",
-    description="Analyzes PR diffs and creates a structured review plan",
-    instructions="""You are the Planner agent in the MergeGuard code review pipeline.
-
-Given a PR diff, you must:
-1. Identify all changed files and categorize them (source, test, config, docs)
-2. Assess the risk level of each change (high/medium/low)
-3. Create a review plan with specific focus areas for each file
-4. Flag any files that need security review
-5. Hand off to the Reviewer agent with the structured plan
-
-Output a structured review plan before handing off.""",
-    tools=[{"type": "web_search"}],
-    # handoffs=[reviewer.id]  — set after all agents created
-)
+```
+Model:       mistral-large-latest
+Name:        mergeguard-planner
+Description: Reads PR diffs and decomposes them into reviewable chunks with context
+Tools:       [web_search]
+Handoffs:    [reviewer_agent.id]
+Instructions: (see AGENT_PROMPTS.md)
 ```
 
-### 4.2 Reviewer Agent
-```python
-reviewer = client.beta.agents.create(
-    model="mistral-large-latest",
-    name="mergeguard-reviewer",
-    description="Performs line-by-line code review with custom tools",
-    instructions="""You are the Reviewer agent in the MergeGuard code review pipeline.
+**Responsibilities:**
+- Parse the unified diff format
+- Identify changed files, functions, and logical units
+- Use web_search to look up unfamiliar libraries/APIs referenced in changes
+- Categorize changes: security-sensitive, logic change, style, refactor, new feature, test
+- Output a structured plan of review chunks for the Reviewer
+- Hand off to Reviewer with the decomposed plan
 
-Given a review plan from the Planner, you must:
-1. Use get_file_context to understand the full file context around changes
-2. Use get_blame to understand change history
-3. Review each changed file according to the plan's focus areas
-4. Produce structured review comments with:
-   - File path and line numbers
-   - Severity (critical/warning/info)
-   - Category (security/performance/style/logic/test-coverage)
-   - Description and suggested fix
-5. Hand off to the Verifier with your findings
+### 3.2 Reviewer Agent
 
-Be thorough but avoid false positives. Focus on real issues.""",
-    tools=[
-        {
-            "type": "function",
-            "function": {
-                "name": "get_file_context",
-                "description": "Get the full content of a file in the repository",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "file_path": {"type": "string", "description": "Path to the file"},
-                        "start_line": {"type": "integer", "description": "Start line (optional)"},
-                        "end_line": {"type": "integer", "description": "End line (optional)"}
-                    },
-                    "required": ["file_path"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "get_blame",
-                "description": "Get git blame information for a file",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "file_path": {"type": "string", "description": "Path to the file"},
-                        "line_number": {"type": "integer", "description": "Specific line to blame"}
-                    },
-                    "required": ["file_path"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "get_pr_diff",
-                "description": "Get the unified diff for the pull request",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "file_path": {"type": "string", "description": "Optional: specific file diff"}
-                    }
-                }
-            }
-        }
-    ],
-    # handoffs=[verifier.id]
-)
+```
+Model:       mistral-large-latest
+Name:        mergeguard-reviewer
+Description: Performs line-by-line code analysis using function tools for context
+Tools:       [function:get_file_context, function:get_blame]
+Handoffs:    [verifier_agent.id]
+Instructions: (see AGENT_PROMPTS.md)
 ```
 
-### 4.3 Verifier Agent
-```python
-verifier = client.beta.agents.create(
-    model="devstral-latest",
-    name="mergeguard-verifier",
-    description="Validates review findings by running code analysis",
-    instructions="""You are the Verifier agent in the MergeGuard code review pipeline.
+**Responsibilities:**
+- For each chunk from the Planner, perform detailed code review
+- Call `get_file_context(file, start_line, end_line)` to see surrounding code
+- Call `get_blame(file, line)` to understand change history
+- Identify: bugs, security issues, performance problems, style violations, missing error handling
+- Assign severity: critical, warning, info, style
+- Hand off findings + original diff to Verifier
 
-Given review findings from the Reviewer, you must:
-1. Use the code interpreter to run linting checks on flagged code
-2. Verify security findings with actual code analysis
-3. Run type checking where applicable
-4. Test edge cases mentioned in review comments
-5. Mark each finding as: verified, false-positive, or needs-human-review
-6. Hand off to the Reporter with verified findings
+### 3.3 Verifier Agent
 
-Use code_interpreter to actually execute checks, don't just reason about them.""",
-    tools=[{"type": "code_interpreter"}],
-    # handoffs=[reporter.id]
-)
+```
+Model:       devstral-small-latest (or devstral-2512)
+Name:        mergeguard-verifier
+Description: Validates review findings by running linting and test code
+Tools:       [code_interpreter]
+Handoffs:    [reporter_agent.id]
+Instructions: (see AGENT_PROMPTS.md)
 ```
 
-### 4.4 Reporter Agent
-```python
-from pydantic import BaseModel
-from typing import List, Literal
+**Responsibilities:**
+- Take Reviewer findings and attempt to verify them programmatically
+- Use code_interpreter to:
+  - Run linting rules against code snippets
+  - Execute simple test cases to verify bug claims
+  - Check for common vulnerability patterns (regex-based)
+  - Validate that suggested fixes compile/run
+- Mark each finding as: verified, likely, unverified, false_positive
+- Hand off verified findings to Reporter
 
-class ReviewFinding(BaseModel):
-    file_path: str
-    line_start: int
-    line_end: int
-    severity: Literal["critical", "warning", "info"]
-    category: Literal["security", "performance", "style", "logic", "test-coverage"]
-    description: str
-    suggested_fix: str
-    verified: bool
+### 3.4 Reporter Agent
 
-class MergeVerdict(BaseModel):
-    decision: Literal["merge", "block", "request-changes"]
-    confidence: float  # 0.0 - 1.0
-    summary: str
-    findings: List[ReviewFinding]
-    critical_count: int
-    warning_count: int
-    info_count: int
-    review_duration_seconds: float
-
-reporter = client.beta.agents.create(
-    model="mistral-large-latest",
-    name="mergeguard-reporter",
-    description="Aggregates findings into a structured merge verdict",
-    instructions="""You are the Reporter agent in the MergeGuard code review pipeline.
-
-Given verified findings from the Verifier, you must:
-1. Aggregate all findings into a structured report
-2. Calculate the merge verdict based on:
-   - BLOCK if any critical findings are verified
-   - REQUEST-CHANGES if warnings > 3 or any security warnings
-   - MERGE if only info-level findings
-3. Assign a confidence score (0.0-1.0)
-4. Write a human-readable summary
-5. Output the final verdict as structured JSON
-
-Be decisive. The verdict should be actionable.""",
-    completion_args=CompletionArgs(
-        response_format=ResponseFormat(
-            type="json_schema",
-            json_schema=JSONSchema(
-                name="merge_verdict",
-                schema=MergeVerdict.model_json_schema(),
-            )
-        )
-    ),
-)
+```
+Model:       mistral-large-latest
+Name:        mergeguard-reporter
+Description: Aggregates findings into a structured JSON review verdict
+Tools:       []
+Handoffs:    []
+CompletionArgs: response_format=ReviewVerdict (JSON schema)
+Instructions: (see AGENT_PROMPTS.md)
 ```
 
----
+**Responsibilities:**
+- Aggregate all findings from Verifier
+- Produce a final structured JSON verdict (see schemas below)
+- Include: overall verdict (approve/request_changes/comment), summary, per-file findings
+- No handoffs — terminal agent in the chain
 
-## 5. Handoff Chain Setup
+## 4. Pipeline Orchestration Flow
+
 ```python
-# After all agents are created, wire up handoffs
-planner = client.beta.agents.update(
+# Pseudocode — NOT production code
+
+# 1. Create all 4 agents
+planner = client.beta.agents.create(...)
+reviewer = client.beta.agents.create(...)
+verifier = client.beta.agents.create(...)
+reporter = client.beta.agents.create(...)
+
+# 2. Set up handoff chain
+client.beta.agents.update(agent_id=planner.id, handoffs=[reviewer.id])
+client.beta.agents.update(agent_id=reviewer.id, handoffs=[verifier.id])
+client.beta.agents.update(agent_id=verifier.id, handoffs=[reporter.id])
+
+# 3. Start conversation with Planner
+response = client.beta.conversations.start(
     agent_id=planner.id,
-    handoffs=[reviewer.id]
+    inputs=[{"role": "user", "content": f"Review this PR diff:\n\n{diff_text}"}]
 )
-reviewer = client.beta.agents.update(
-    agent_id=reviewer.id,
-    handoffs=[verifier.id]
-)
-verifier = client.beta.agents.update(
-    agent_id=verifier.id,
-    handoffs=[reporter.id]
-)
+
+# 4. Handle function calls in a loop
+while not is_terminal(response):
+    if has_function_call(response):
+        result = execute_function(response)
+        response = client.beta.conversations.append(
+            conversation_id=response.conversation_id,
+            inputs=[FunctionResultEntry(tool_call_id=..., result=result)]
+        )
+    else:
+        # Agent handoff or final response — continue
+        break
+
+# 5. Extract final structured JSON from Reporter
+verdict = parse_verdict(response)
 ```
 
----
+**Key insight:** The Mistral Agents API handles handoffs automatically. When the Planner decides it's done, it hands off to the Reviewer within the same conversation. We only need to handle function calls (step 4) since built-in tools (web_search, code_interpreter) execute server-side.
 
-## 6. Frontend (Next.js)
+## 5. Tech Stack
 
-### Pages
-- `/` — Dashboard: paste PR URL, trigger review
-- `/review/[id]` — Live review progress (streaming agent handoffs)
-- `/history` — Past reviews
+### Backend (Python)
+- **Runtime:** Python 3.12+ with `uv`
+- **SDK:** `mistralai` (latest, for beta agents API)
+- **Framework:** FastAPI for the API server
+- **Key endpoints:**
+  - `POST /api/review` — Submit a PR diff for review
+  - `GET /api/review/{id}` — Get review status/results
+  - `GET /api/review/{id}/stream` — SSE stream of pipeline progress
+  - `GET /api/health` — Health check
 
-### Key Components
-- `PipelineProgress` — Shows which agent is active, with live streaming
-- `FindingsList` — Displays review findings with severity badges
-- `VerdictCard` — Shows final merge/block decision with confidence
-- `DiffViewer` — Shows annotated diff with inline review comments
+### Frontend (Next.js)
+- **Framework:** Next.js 14+ (App Router)
+- **UI:** Tailwind CSS + shadcn/ui
+- **Features:**
+  - PR diff input (paste or GitHub URL)
+  - Real-time pipeline progress visualization (SSE)
+  - Agent activity feed (which agent is active, what tools are being called)
+  - Final verdict display with severity badges
+  - File-level findings with inline diff annotations
 
-### API Routes
-- `POST /api/review` — Start a new review (accepts PR diff or GitHub URL)
-- `GET /api/review/[id]` — Get review status/results
-- `GET /api/health` — Health check
+### Deployment
+- **Vercel:** Frontend (Next.js) + Backend (Python serverless functions or API routes)
+- Alternative: Frontend on Vercel, Backend on Railway if needed
 
----
+## 6. Data Flow
 
-## 7. Demo PR (Pre-prepared)
+```
+User Input (PR diff text or GitHub PR URL)
+    │
+    ▼
+FastAPI Backend
+    │
+    ├─── Parse diff / Fetch from GitHub API
+    │
+    ├─── Create Mistral Agents (if not cached)
+    │
+    ├─── Start Conversation with Planner
+    │         │
+    │         ├─── [web_search] Planner looks up context
+    │         │
+    │         ├─── [handoff] → Reviewer
+    │         │         │
+    │         │         ├─── [function_call] get_file_context()
+    │         │         ├─── [function_call] get_blame()
+    │         │         │
+    │         │         ├─── [handoff] → Verifier
+    │         │         │         │
+    │         │         │         ├─── [code_interpreter] lint checks
+    │         │         │         ├─── [code_interpreter] test execution
+    │         │         │         │
+    │         │         │         ├─── [handoff] → Reporter
+    │         │         │         │         │
+    │         │         │         │         └─── Structured JSON output
+    │         │         │         │
+    │         │         │
+    │         │
+    │
+    ├─── Stream progress events via SSE
+    │
+    └─── Return final ReviewVerdict JSON
+              │
+              ▼
+         Next.js Frontend (displays results)
+```
 
-Create a demo repository with a PR containing known issues:
+## 7. Directory Structure (Planned)
 
-1. **Security flaw** — SQL injection in a query builder (critical)
-2. **Performance issue** — N+1 query in a loop (warning)
-3. **Style violation** — Inconsistent naming convention (info)
-4. **Missing test** — New function with no test coverage (warning)
-5. **Logic bug** — Off-by-one error in pagination (critical)
-
-This ensures the demo is reliable and showcases all severity levels.
-
----
-
-## 8. Tech Stack
-
-| Layer | Technology |
-|-------|-----------|
-| Backend | Python 3.12 + `mistralai` SDK |
-| Frontend | Next.js 14 + TypeScript + Tailwind |
-| API | Next.js API routes (Python subprocess or API call) |
-| Deploy | Vercel (frontend) |
-| CI | GitHub Actions |
-
----
-
-## 9. File Structure (Planned)
 ```
 mergeguard/
-├── app/                    # Next.js app directory
-│   ├── page.tsx           # Dashboard
-│   ├── review/[id]/page.tsx  # Review detail
-│   ├── api/
-│   │   ├── review/route.ts   # Start review
-│   │   ├── health/route.ts   # Health check
-│   │   └── status/[id]/route.ts  # Review status
-│   └── layout.tsx
-├── lib/
-│   ├── agents.ts          # Agent creation + handoff setup
-│   ├── tools.ts           # Function calling tool implementations
-│   ├── types.ts           # TypeScript types for verdict, findings
-│   └── mistral.ts         # Mistral client setup
-├── components/
-│   ├── PipelineProgress.tsx
-│   ├── FindingsList.tsx
-│   ├── VerdictCard.tsx
-│   └── DiffViewer.tsx
-├── demo/                  # Demo PR files
-│   ├── vulnerable-query.ts
-│   ├── n-plus-one.ts
-│   └── off-by-one.ts
-├── package.json
-├── tsconfig.json
-├── tailwind.config.ts
+├── backend/
+│   ├── pyproject.toml
+│   ├── app/
+│   │   ├── main.py              # FastAPI app
+│   │   ├── agents/
+│   │   │   ├── __init__.py
+│   │   │   ├── factory.py       # Agent creation & handoff setup
+│   │   │   ├── planner.py       # Planner agent config & prompts
+│   │   │   ├── reviewer.py      # Reviewer agent config & prompts
+│   │   │   ├── verifier.py      # Verifier agent config & prompts
+│   │   │   └── reporter.py      # Reporter agent config & prompts
+│   │   ├── tools/
+│   │   │   ├── __init__.py
+│   │   │   ├── get_file_context.py
+│   │   │   └── get_blame.py
+│   │   ├── pipeline/
+│   │   │   ├── __init__.py
+│   │   │   ├── orchestrator.py  # Main pipeline loop
+│   │   │   └── events.py        # SSE event types
+│   │   ├── schemas/
+│   │   │   ├── __init__.py
+│   │   │   ├── review.py        # ReviewVerdict, Finding, etc.
+│   │   │   └── diff.py          # DiffChunk, FileChange, etc.
+│   │   └── github_client.py     # GitHub API integration
+│   └── tests/
+│       └── ...
+├── frontend/
+│   ├── package.json
+│   ├── next.config.js
+│   ├── app/
+│   │   ├── layout.tsx
+│   │   ├── page.tsx             # Main dashboard
+│   │   └── review/
+│   │       └── [id]/
+│   │           └── page.tsx     # Review results page
+│   ├── components/
+│   │   ├── DiffInput.tsx
+│   │   ├── PipelineProgress.tsx
+│   │   ├── AgentActivity.tsx
+│   │   ├── VerdictDisplay.tsx
+│   │   └── FindingCard.tsx
+│   └── lib/
+│       ├── api.ts
+│       └── types.ts
+├── demo/
+│   ├── sample-pr-diff.patch     # Demo PR with known issues
+│   └── expected-output.json     # Expected review verdict
+├── README.md
 ├── vercel.json
-└── README.md
+└── .env.example
 ```
 
----
+## 8. Demo Strategy
 
-## 10. Judging Optimization
+The demo PR should contain intentional issues across categories:
 
-| Criterion (25% each) | How MergeGuard Scores |
-|----------------------|----------------------|
-| **Impact** | Every dev team has PR review bottleneck. Measurable: review time, catch rate |
-| **Technical Implementation** | 4 agents, 6+ Mistral features, handoff chain, structured output |
-| **Creativity** | NOT a chatbot — structured pipeline with verification step is novel |
-| **Pitch** | Live demo with real PR, before/after comparison, clear metrics |
+1. **Security flaw:** SQL injection via string concatenation in a query builder
+2. **Bug:** Off-by-one error in pagination logic
+3. **Performance:** N+1 query in a loop
+4. **Style violation:** Inconsistent naming, missing docstrings
+5. **Missing test:** New function with no corresponding test file
+6. **Good code:** Some clean changes that should be approved (to show the system isn't just negative)
 
----
+This demonstrates the pipeline catches diverse issue types and produces a nuanced verdict.
 
-## 11. Risk Mitigations
+## 9. Judging Criteria Alignment
 
-| Risk | Mitigation |
-|------|-----------|
-| Agents API down | Fallback: direct chat completions with manual orchestration |
-| Handoffs broken | Each agent can run standalone; degrade to sequential API calls |
-| Rate limits | Use ministral-8b for Planner (low-stakes), large only for Reviewer/Reporter |
-| Over-scope | MVP = 4 agents + 1 demo PR + verdict JSON. No extras until MVP works |
-| Demo fails | Pre-cache one successful run; show cached result if live fails |
+| Criteria | How MergeGuard Scores |
+|----------|----------------------|
+| **Agent Skills usage** | 8 Mistral features, 4-agent handoff chain |
+| **Technical complexity** | Multi-agent orchestration with function calling loop |
+| **Practical utility** | Solves real PR review bottleneck every dev faces |
+| **Demo quality** | Real-time pipeline visualization, clear before/after |
+| **Code quality** | Clean architecture, typed schemas, error handling |
+| **Originality** | Not a chatbot — a structured pipeline with verification |
