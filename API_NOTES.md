@@ -1,42 +1,35 @@
-# MergeGuard — Mistral Agents API Notes
+# MergeGuard — Mistral Agents API Study Notes
 
-> **Status:** Pre-hackathon prep (API study notes)
-> **Source:** https://docs.mistral.ai/agents/
+> Notes from reading the official docs at docs.mistral.ai/agents/*
 
 ---
 
 ## Key API Patterns Learned
 
-### 1. Agent Creation (Beta)
+### 1. Agent Creation (`client.beta.agents.create`)
 
 ```python
-from mistralai import Mistral, CompletionArgs, ResponseFormat, JSONSchema
-
-client = Mistral(api_key=os.environ["MISTRAL_API_KEY"])
-
 agent = client.beta.agents.create(
-    model="mistral-large-latest",
+    model="mistral-large-latest",       # or "devstral-latest"
     name="agent-name",
-    description="What this agent does",
-    instructions="System prompt / instructions",
-    tools=[...],                    # List of tool configs
-    completion_args=CompletionArgs(  # Optional
+    description="What this agent does",  # Used by other agents to decide handoffs
+    instructions="System prompt",        # Detailed behavioral instructions
+    tools=[...],                         # function, web_search, code_interpreter
+    completion_args=CompletionArgs(      # Optional: structured output, temperature
         response_format=ResponseFormat(
             type="json_schema",
-            json_schema=JSONSchema(
-                name="schema_name",
-                schema=PydanticModel.model_json_schema(),
-            )
+            json_schema=JSONSchema(name="...", schema=Model.model_json_schema())
         ),
-        temperature=0.3,
-        top_p=0.95,
+        temperature=0.1,
     ),
+    handoffs=[other_agent.id],           # Set AFTER all agents created
 )
 ```
 
-### 2. Handoff Setup
+### 2. Handoff Setup (Two-Step)
 
-Handoffs are set AFTER agent creation (need agent IDs):
+1. Create all agents first (no handoffs)
+2. Update each agent with handoff targets:
 
 ```python
 client.beta.agents.update(
@@ -45,180 +38,154 @@ client.beta.agents.update(
 )
 ```
 
-**Important:** No depth limit on chained handoffs. A→B→C→D is fine.
+**Important:** Handoffs are one-directional. Planner → Reviewer doesn't mean Reviewer → Planner.
 
-### 3. Conversations API
+### 3. Conversation Flow
 
-Start a conversation:
 ```python
+# Start
 response = client.beta.conversations.start(
     agent_id=planner.id,
-    inputs=[{"role": "user", "content": "..."}]
+    inputs="Review this diff: ...",
+    handoff_execution="client"  # or "server"
 )
-```
 
-Continue a conversation (for function call results):
-```python
-from mistralai import FunctionResultEntry
-
+# Continue
 response = client.beta.conversations.append(
     conversation_id=response.conversation_id,
-    inputs=[FunctionResultEntry(
-        tool_call_id=response.outputs[-1].tool_call_id,
-        result=json.dumps(result_dict),
-    )]
+    inputs=[...]
 )
 ```
 
-### 4. Response Output Types
+### 4. Handoff Execution Modes
 
-The `response.outputs` list contains entries with different `type` values:
+- **`server`** (default): Mistral cloud handles handoffs automatically. The conversation flows through agents without client intervention. Function calls are also handled server-side if possible.
+- **`client`**: Handoffs and function calls are returned to the client. The client must handle them and continue the conversation.
 
-| Type | Description | Action Needed |
-|------|-------------|---------------|
-| `message.output` | Text response from agent | Read content |
-| `function.call` | Agent wants to call a custom function | Execute function, return result via `conversations.append` |
-| `tool.execution` | Built-in tool was executed (web_search, code_interpreter) | No action — server-side |
-| `handoff` | Agent handed off to another agent | Conversation continues with new agent |
+**For MergeGuard:** We need `client` mode because:
+- We need to intercept function calls (get_file_context, get_blame) and execute them locally against the GitHub API
+- We want to emit SSE events for each step (agent_start, handoff, finding, etc.)
 
-### 5. Function Call Handling Loop
+### 5. Response Output Types
+
+When using `handoff_execution="client"`, response outputs can be:
+- `type == "message"` → Agent produced a text response
+- `type == "function.call"` → Agent wants to call a function
+- `type == "handoff"` → Agent wants to hand off to another agent (only in client mode)
+
+### 6. Function Call Handling
 
 ```python
-import json
 from mistralai import FunctionResultEntry
 
-# Map of function names to implementations
-FUNCTIONS = {
-    "get_file_context": get_file_context_impl,
-    "get_blame": get_blame_impl,
-}
-
-def run_pipeline(diff_text):
-    response = client.beta.conversations.start(
-        agent_id=planner.id,
-        inputs=[{"role": "user", "content": diff_text}]
+if output.type == "function.call":
+    result = my_functions[output.name](**json.loads(output.arguments))
+    response = client.beta.conversations.append(
+        conversation_id=response.conversation_id,
+        inputs=[FunctionResultEntry(
+            tool_call_id=output.tool_call_id,
+            result=json.dumps(result)
+        )]
     )
-
-    while True:
-        last_output = response.outputs[-1]
-
-        if last_output.type == "message.output":
-            # Final response (from Reporter)
-            return last_output.content
-        elif last_output.type == "function.call":
-            # Execute the function
-            func = FUNCTIONS[last_output.name]
-            args = json.loads(last_output.arguments)
-            result = func(**args)
-
-            response = client.beta.conversations.append(
-                conversation_id=response.conversation_id,
-                inputs=[FunctionResultEntry(
-                    tool_call_id=last_output.tool_call_id,
-                    result=json.dumps(result),
-                )]
-            )
-        else:
-            # Handoff or tool execution — check if there's a message
-            # The API may return multiple outputs; find the last meaningful one
-            break
-
-    return response
 ```
 
-### 6. Tool Configuration Formats
+### 7. Structured Output with Agents
 
-**Web Search:**
-```python
-{"type": "web_search"}
-# or premium:
-{"type": "web_search_premium"}
-```
-
-**Code Interpreter:**
-```python
-{"type": "code_interpreter"}
-```
-
-**Custom Function:**
-```python
-{
-    "type": "function",
-    "function": {
-        "name": "function_name",
-        "description": "What it does",
-        "parameters": {
-            "type": "object",
-            "properties": { ... },
-            "required": [...]
-        }
-    }
-}
-```
-
-### 7. Model Selection
-
-| Agent | Model | Rationale |
-|-------|-------|-----------|
-| Planner | `mistral-large-latest` | Best reasoning for decomposition |
-| Reviewer | `mistral-large-latest` | Best analysis for code review |
-| Verifier | `devstral-small-latest` | Code-specialized, good for writing test/lint code |
-| Reporter | `mistral-large-latest` | Best at structured output generation |
-
-**Note:** `devstral-small-latest` is the current Devstral model ID. Verify during hackathon — could also be `devstral-2512` or `devstral-small-2512`.
-
-### 8. Structured Output with Agents
-
-For the Reporter agent, use `completion_args` with `response_format`:
+Use `completion_args` with `response_format`:
 
 ```python
+from mistralai import CompletionArgs, ResponseFormat, JSONSchema
 from pydantic import BaseModel
 
-class ReviewVerdict(BaseModel):
+class Verdict(BaseModel):
     verdict: str
-    summary: str
-    # ... full schema
+    confidence: float
+    findings: list
 
 reporter = client.beta.agents.create(
     model="mistral-large-latest",
-    name="mergeguard-reporter",
-    instructions="...",
     completion_args=CompletionArgs(
         response_format=ResponseFormat(
             type="json_schema",
             json_schema=JSONSchema(
-                name="ReviewVerdict",
-                schema=ReviewVerdict.model_json_schema(),
+                name="review_verdict",
+                schema=Verdict.model_json_schema()
             )
         )
     ),
+    ...
+)
+```
+
+### 8. Streaming
+
+```python
+response = client.beta.conversations.start(
+    agent_id=planner.id,
+    inputs="...",
+    stream=True  # If supported
+)
+```
+
+**Note:** Need to verify if streaming is supported with conversations API during hackathon testing.
+
+### 9. Code Interpreter
+
+Built-in tool, no schema needed:
+
+```python
+verifier = client.beta.agents.create(
+    model="devstral-latest",
+    tools=[{"type": "code_interpreter"}],
+    ...
+)
+```
+
+The agent can write and execute code in a sandboxed environment. Output includes stdout, stderr, and any generated files.
+
+### 10. Web Search
+
+Built-in tool:
+
+```python
+reviewer = client.beta.agents.create(
+    tools=[
+        {"type": "web_search"},
+        {"type": "function", "function": {...}},  # Can mix tool types
+    ],
+    ...
 )
 ```
 
 ---
 
-## Gotchas & Edge Cases to Watch
+## Important Gotchas
 
-1. **Handoff outputs:** When an agent hands off, the response may contain multiple outputs (the handoff entry + the new agent's response). Need to iterate through all outputs.
+1. **Agent IDs are persistent** — Created agents live on the Mistral platform. Don't recreate on every request. Create once at startup, reuse the IDs.
 
-2. **Multiple function calls:** An agent might make multiple function calls in sequence. The loop must handle this — after returning one function result, the agent may call another.
+2. **Conversation state is server-side** — The conversation history is stored by Mistral. We don't need to manage it. Use `store=False` if we don't want persistence.
 
-3. **Conversation state:** The conversation_id persists across handoffs. All agents share the same conversation thread.
+3. **Handoffs carry context** — When agent A hands off to agent B, the full conversation history is available to B. No need to re-inject context.
 
-4. **Rate limits:** With 4 agents + tool calls, a single review could make 10-20 API calls. Watch for rate limiting.
+4. **Description matters for handoffs** — The agent's `description` field is what other agents see when deciding whether to hand off. Make it clear and specific.
 
-5. **Timeout handling:** Long pipelines could take 30-60 seconds. Need proper timeout handling and SSE keep-alive.
+5. **Multiple function calls** — An agent can make multiple function calls in sequence before producing a final response or handoff. Our loop must handle this.
 
-6. **Error recovery:** If an agent fails mid-pipeline, we need to handle gracefully — show partial results.
+6. **Devstral for code tasks** — `devstral-latest` is optimized for code. Use it for the Verifier (code_interpreter) for better code generation/analysis.
+
+7. **Temperature for determinism** — Use low temperature (0.0-0.2) for Reviewer and Reporter to get consistent, deterministic results. Planner can be slightly higher (0.2-0.3).
 
 ---
 
 ## SDK Installation
 
 ```bash
-uv add mistralai
-# or
-uv pip install mistralai
+uv add mistralai fastapi uvicorn httpx sse-starlette pydantic
 ```
 
-Ensure latest version for beta agents API support.
+## Environment Variables Needed
+
+```
+MISTRAL_API_KEY=...
+GITHUB_TOKEN=...  (for PR diff fetching)
+```

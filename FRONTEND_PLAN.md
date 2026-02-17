@@ -1,177 +1,187 @@
-# MergeGuard — Frontend Plan
+# MergeGuard — Frontend Plan (Next.js)
 
-> **Status:** Pre-hackathon prep (UI design, not production code)
+> **Pre-hackathon design only — not production code**
 
 ---
 
-## 1. Pages
-
-### Page 1: Home / Submit (`/`)
-- Hero section: "MergeGuard — AI-Powered Multi-Agent Code Review"
-- Two input modes:
-  - **Paste Diff:** Large textarea for pasting unified diff
-  - **GitHub URL:** Input field for `https://github.com/owner/repo/pull/123`
-- Options panel (collapsible):
-  - Focus areas checkboxes: Security, Bugs, Performance, Quality
-  - Severity threshold dropdown
-- "Start Review" button → redirects to `/review/[id]`
-
-### Page 2: Review Pipeline (`/review/[id]`)
-- **Top:** Review metadata (PR title, files changed count, timestamp)
-- **Pipeline Visualization:** Horizontal stepper showing 4 agents
-  - Each step shows: agent name, model, status (waiting/active/done)
-  - Active step has animated pulse
-  - Completed steps show green checkmark + duration
-- **Activity Feed:** Real-time log of events (SSE)
-  - Tool calls with expandable details
-  - Findings as they're detected (with severity badge)
-  - Handoff events with arrow animation
-- **Results Panel** (appears when pipeline completes):
-  - Verdict badge: APPROVE (green), COMMENT (yellow), REQUEST_CHANGES (red)
-  - Summary paragraph
-  - Stats bar: X critical, Y warnings, Z info, W style
-  - Per-file accordion with findings
-  - Each finding: severity badge, title, description, suggestion, verification status
-
-## 2. Component Tree
+## 1. Pages & Routes
 
 ```
-App
-├── Layout
-│   ├── Header (logo, "Powered by Mistral AI" badge)
-│   └── Footer
-├── HomePage
-│   ├── HeroSection
-│   ├── DiffInput
-│   │   ├── TabSwitch (Paste / GitHub URL)
-│   │   ├── DiffTextarea
-│   │   └── GitHubUrlInput
-│   ├── ReviewOptions
-│   └── SubmitButton
-└── ReviewPage
-    ├── ReviewHeader (PR info)
-    ├── PipelineStepper
-    │   ├── AgentStep (×4)
-    │   │   ├── AgentIcon
-    │   │   ├── AgentLabel
-    │   │   ├── ModelBadge
-    │   │   └── StatusIndicator
-    │   └── HandoffArrow (×3)
-    ├── ActivityFeed
-    │   ├── EventCard (×N)
-    │   │   ├── EventIcon
-    │   │   ├── EventTimestamp
-    │   │   └── EventDetail
-    │   └── ScrollAnchor (auto-scroll)
-    └── ResultsPanel
-        ├── VerdictBadge
-        ├── SummaryText
-        ├── StatsBar
-        ├── FileAccordion (×N)
-        │   ├── FileHeader (path, language, finding count)
-        │   ├── FindingCard (×N)
-        │   │   ├── SeverityBadge
-        │   │   ├── CategoryTag
-        │   │   ├── Title
-        │   │   ├── Description
-        │   │   ├── CodeSnippet (syntax highlighted)
-        │   │   ├── Suggestion
-        │   │   └── VerificationBadge
-        │   └── PositiveNotes
-        └── RecommendationsList
+/                    → Landing page with PR URL input
+/review/:id          → Review dashboard (real-time pipeline view)
+/review/:id/report   → Final report view (shareable)
 ```
 
-## 3. Visual Design
+## 2. Landing Page (`/`)
 
-### Color Palette
-- **Background:** Dark (#0a0a0a) with subtle grid pattern
-- **Cards:** Dark gray (#1a1a1a) with border (#2a2a2a)
-- **Primary accent:** Mistral orange (#FF7000)
-- **Severity colors:**
-  - Critical: Red (#EF4444)
-  - Warning: Amber (#F59E0B)
-  - Info: Blue (#3B82F6)
-  - Style: Gray (#6B7280)
-- **Verdict colors:**
-  - Approve: Green (#22C55E)
-  - Comment: Yellow (#EAB308)
-  - Request Changes: Red (#EF4444)
-- **Verification status:**
-  - Verified: Green (#22C55E) with checkmark
-  - Likely: Blue (#3B82F6) with ~
-  - Unverified: Gray (#6B7280) with ?
-  - False Positive: Strikethrough
+```
+┌──────────────────────────────────────────────────────────┐
+│                                                          │
+│              🛡️  MergeGuard                              │
+│         Multi-Agent Code Review Pipeline                 │
+│                                                          │
+│  ┌────────────────────────────────────────────────────┐  │
+│  │  https://github.com/owner/repo/pull/123           │  │
+│  └────────────────────────────────────────────────────┘  │
+│                                                          │
+│              [ 🔍 Start Review ]                         │
+│                                                          │
+│  ─── or paste a diff ───                                 │
+│                                                          │
+│  ┌────────────────────────────────────────────────────┐  │
+│  │  (textarea for raw diff)                           │  │
+│  │                                                    │  │
+│  └────────────────────────────────────────────────────┘  │
+│                                                          │
+│  Powered by Mistral Agents API                           │
+│  Planner → Reviewer → Verifier → Reporter                │
+│                                                          │
+└──────────────────────────────────────────────────────────┘
+```
 
-### Typography
-- **Font:** Inter (system fallback)
-- **Code:** JetBrains Mono
-- **Headings:** Bold, tracking-tight
+## 3. Review Dashboard (`/review/:id`)
 
-### Animations
-- Pipeline stepper: Smooth transitions between steps
-- Active agent: Pulsing glow effect
-- Finding cards: Slide-in animation as they appear
-- Verdict reveal: Scale-up with confetti for APPROVE
+This is the **hero page** — shows real-time pipeline progress.
 
-## 4. Key UX Decisions
+```
+┌──────────────────────────────────────────────────────────┐
+│  🛡️ MergeGuard  │  Review #rev_abc123                    │
+├──────────────────────────────────────────────────────────┤
+│                                                          │
+│  Pipeline Progress                                       │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐│
+│  │ PLANNER  │→│ REVIEWER  │→│ VERIFIER  │→│ REPORTER  ││
+│  │ ✅ Done  │  │ 🔄 Active│  │ ⏳ Wait  │  │ ⏳ Wait  ││
+│  │ 15s      │  │ 23s...   │  │          │  │          ││
+│  └──────────┘  └──────────┘  └──────────┘  └──────────┘│
+│                                                          │
+│  ── Live Activity Feed ──                                │
+│                                                          │
+│  12:00:00  🟢 Planner started                            │
+│  12:00:05  📋 Analyzing 5 changed files                  │
+│  12:00:12  📦 Decomposed into 8 review chunks            │
+│  12:00:15  🔀 Handoff: Planner → Reviewer                │
+│  12:00:18  🔍 Reviewing src/auth/login.py (HIGH risk)    │
+│  12:00:20  🔧 Function call: get_file_context(login.py)  │
+│  12:00:23  🚨 Finding: SQL Injection in login() [CRIT]   │
+│  12:00:25  🔍 Reviewing src/api/users.py (MEDIUM risk)   │
+│  ...                                                     │
+│                                                          │
+│  ── Findings So Far (3) ──                               │
+│                                                          │
+│  🔴 CRITICAL  SQL Injection in login()     login.py:15   │
+│  🟡 MEDIUM    Missing input validation     users.py:42   │
+│  🔵 LOW       Inconsistent naming          utils.py:8    │
+│                                                          │
+└──────────────────────────────────────────────────────────┘
+```
 
-1. **Real-time is critical for demo:** The pipeline visualization must update in real-time via SSE. This is the "wow factor" for judges.
+### Key UI Components
 
-2. **No auth required:** For the hackathon demo, no login needed. Just paste and go.
+1. **Pipeline Stepper** — 4 horizontal cards showing agent status
+   - States: waiting (gray), active (blue pulse), complete (green), error (red)
+   - Shows elapsed time for each agent
 
-3. **Mobile responsive:** But optimized for desktop (judges will likely use laptops).
+2. **Live Activity Feed** — Scrolling log of SSE events
+   - Color-coded by event type
+   - Auto-scrolls to bottom
+   - Timestamps
 
-4. **Dark mode only:** Looks more professional for demos, faster to build.
+3. **Findings Panel** — Cards for each finding as they come in
+   - Color-coded by severity
+   - Expandable for details
+   - Verification badge (✅ verified, ❓ unverified)
 
-5. **Loading states:** Each agent step has a skeleton loader while waiting.
+## 4. Report View (`/review/:id/report`)
 
-6. **Error handling:** If pipeline fails, show which agent failed and why, with retry option.
+Final shareable report after pipeline completes.
+
+```
+┌──────────────────────────────────────────────────────────┐
+│  🛡️ MergeGuard Review Report                             │
+│  PR: owner/repo#123                                      │
+│  Date: Feb 28, 2026 12:02 UTC                            │
+├──────────────────────────────────────────────────────────┤
+│                                                          │
+│  ┌────────────────────────────────────────────────────┐  │
+│  │  Verdict: 🔴 REQUEST_CHANGES                       │  │
+│  │  Confidence: 0.92                                  │  │
+│  │                                                    │  │
+│  │  Found 1 critical security vulnerability and 2     │  │
+│  │  medium-severity issues. The SQL injection in      │  │
+│  │  login.py must be fixed before merging.            │  │
+│  └────────────────────────────────────────────────────┘  │
+│                                                          │
+│  Summary Stats                                           │
+│  ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐           │
+│  │🔴 1    │ │🟠 0    │ │🟡 2    │ │🔵 1    │           │
+│  │Critical│ │High    │ │Medium  │ │Low     │           │
+│  └────────┘ └────────┘ └────────┘ └────────┘           │
+│                                                          │
+│  ── Findings ──                                          │
+│                                                          │
+│  F001 🔴 CRITICAL — SQL Injection in login()             │
+│  ┌──────────────────────────────────────────────────┐    │
+│  │ File: src/auth/login.py:15-15                     │    │
+│  │ Category: Security                                │    │
+│  │ Status: ✅ Verified                                │    │
+│  │                                                   │    │
+│  │ The login function uses f-string interpolation    │    │
+│  │ to construct SQL queries, allowing injection.     │    │
+│  │                                                   │    │
+│  │ ```python                                         │    │
+│  │ # Current (vulnerable)                            │    │
+│  │ query = f"SELECT * FROM users WHERE name='{u}'"   │    │
+│  │                                                   │    │
+│  │ # Suggested fix                                   │    │
+│  │ query = "SELECT * FROM users WHERE name = %s"     │    │
+│  │ cursor.execute(query, (username,))                │    │
+│  │ ```                                               │    │
+│  │                                                   │    │
+│  │ Evidence: Code interpreter confirmed injection    │    │
+│  │ with payload: ' OR '1'='1                         │    │
+│  └──────────────────────────────────────────────────┘    │
+│                                                          │
+│  Pipeline Metrics                                        │
+│  Total time: 2m 30s                                      │
+│  Agents: Planner (15s) → Reviewer (45s) →                │
+│          Verifier (60s) → Reporter (10s)                 │
+│  Function calls: 3 │ Code executions: 4                  │
+│                                                          │
+│  [ 📋 Copy JSON ] [ 🔗 Share Link ]                      │
+│                                                          │
+└──────────────────────────────────────────────────────────┘
+```
 
 ## 5. Tech Choices
 
-- **Next.js 14+** with App Router
-- **Tailwind CSS** for styling
-- **shadcn/ui** for base components (Button, Card, Badge, Accordion, Tabs)
-- **Lucide React** for icons
-- **react-syntax-highlighter** or **shiki** for code blocks
-- **EventSource API** for SSE consumption
-- **Framer Motion** for animations (if time permits, otherwise CSS transitions)
+| Aspect | Choice | Rationale |
+|--------|--------|-----------|
+| Framework | Next.js 14 (App Router) | Vercel-native, SSR for report pages |
+| Styling | Tailwind CSS | Fast to build, consistent |
+| Components | shadcn/ui | Professional look, accessible |
+| Icons | Lucide React | Clean, consistent icon set |
+| SSE Client | EventSource API | Native browser support |
+| State | React useState + useReducer | Simple, no external deps needed |
+| Animation | Framer Motion (minimal) | Pipeline stepper transitions |
 
-## 6. API Integration
+## 6. Color Palette
 
-```typescript
-// Pseudocode for SSE consumption
-
-function useReviewStream(reviewId: string) {
-  const [state, dispatch] = useReducer(reviewReducer, initialState);
-
-  useEffect(() => {
-    const eventSource = new EventSource(`/api/review/${reviewId}/stream`);
-
-    eventSource.addEventListener('agent.started', (e) => {
-      dispatch({ type: 'AGENT_STARTED', payload: JSON.parse(e.data) });
-    });
-
-    eventSource.addEventListener('tool.called', (e) => {
-      dispatch({ type: 'TOOL_CALLED', payload: JSON.parse(e.data) });
-    });
-
-    eventSource.addEventListener('finding.detected', (e) => {
-      dispatch({ type: 'FINDING_DETECTED', payload: JSON.parse(e.data) });
-    });
-
-    eventSource.addEventListener('agent.handoff', (e) => {
-      dispatch({ type: 'AGENT_HANDOFF', payload: JSON.parse(e.data) });
-    });
-
-    eventSource.addEventListener('pipeline.completed', (e) => {
-      dispatch({ type: 'PIPELINE_COMPLETED', payload: JSON.parse(e.data) });
-      eventSource.close();
-    });
-
-    return () => eventSource.close();
-  }, [reviewId]);
-
-  return state;
-}
 ```
+Background:  #0a0a0a (dark) / #ffffff (light)
+Primary:     #f97316 (Mistral orange)
+Critical:    #ef4444 (red)
+High:        #f97316 (orange)
+Medium:      #eab308 (yellow)
+Low:         #3b82f6 (blue)
+Info:        #6b7280 (gray)
+Success:     #22c55e (green)
+Active:      #6366f1 (indigo pulse)
+```
+
+## 7. Responsive Design
+
+- Desktop: Full dashboard with side-by-side panels
+- Tablet: Stacked layout, pipeline stepper wraps
+- Mobile: Single column, collapsible sections
+- Report page: Print-friendly CSS for PDF export

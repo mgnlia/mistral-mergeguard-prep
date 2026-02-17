@@ -1,42 +1,38 @@
 # MergeGuard — Schema Designs
 
-> **Status:** Pre-hackathon prep (schema design, not production code)
+> **Pre-hackathon design only — not production code**
 
 ---
 
 ## 1. Function Calling Schemas
 
-### 1.1 `get_file_context` — Used by Reviewer Agent
+### `get_file_context`
 
-**Purpose:** Retrieve surrounding lines of code from a file to understand the context of a change.
+Fetches file content from the PR's head branch via GitHub API.
 
 ```json
 {
   "type": "function",
   "function": {
     "name": "get_file_context",
-    "description": "Retrieve lines of code from a file in the repository to understand the context surrounding a change. Returns the specified line range with line numbers.",
+    "description": "Fetch the full content of a file or a specific line range from the PR's head branch. Use this to get surrounding context for code changes.",
     "parameters": {
       "type": "object",
       "properties": {
         "file_path": {
           "type": "string",
-          "description": "The relative path to the file in the repository (e.g., 'src/auth/login.py')"
+          "description": "Path to the file in the repository (e.g., 'src/auth/login.py')"
         },
         "start_line": {
           "type": "integer",
-          "description": "The starting line number (1-indexed, inclusive)"
+          "description": "Start line number (1-indexed). If omitted, returns full file."
         },
         "end_line": {
           "type": "integer",
-          "description": "The ending line number (1-indexed, inclusive)"
-        },
-        "branch": {
-          "type": "string",
-          "description": "The branch to read from. Use 'head' for the PR branch (new code) or 'base' for the target branch (old code). Defaults to 'head'."
+          "description": "End line number (1-indexed). If omitted, returns from start_line to EOF."
         }
       },
-      "required": ["file_path", "start_line", "end_line"]
+      "required": ["file_path"]
     }
   }
 }
@@ -46,38 +42,43 @@
 ```json
 {
   "file_path": "src/auth/login.py",
-  "start_line": 10,
-  "end_line": 25,
-  "branch": "head",
-  "content": "10: def authenticate(username, password):\n11:     ...",
   "language": "python",
+  "start_line": 10,
+  "end_line": 30,
+  "content": "def login(username, password):\n    ...",
   "total_lines": 150
 }
 ```
 
-### 1.2 `get_blame` — Used by Reviewer Agent
+---
 
-**Purpose:** Get git blame information for a specific line to understand its history.
+### `get_blame`
+
+Gets git blame info to understand who changed what and when.
 
 ```json
 {
   "type": "function",
   "function": {
     "name": "get_blame",
-    "description": "Get git blame information for a specific line in a file. Returns the author, date, and commit message of the last change to that line.",
+    "description": "Get git blame information for a file to understand recent change history and authorship.",
     "parameters": {
       "type": "object",
       "properties": {
         "file_path": {
           "type": "string",
-          "description": "The relative path to the file in the repository"
+          "description": "Path to the file in the repository"
         },
-        "line_number": {
+        "start_line": {
           "type": "integer",
-          "description": "The line number to get blame for (1-indexed)"
+          "description": "Start line for blame range (1-indexed)"
+        },
+        "end_line": {
+          "type": "integer",
+          "description": "End line for blame range (1-indexed)"
         }
       },
-      "required": ["file_path", "line_number"]
+      "required": ["file_path"]
     }
   }
 }
@@ -87,271 +88,288 @@
 ```json
 {
   "file_path": "src/auth/login.py",
-  "line_number": 15,
-  "author": "jane.doe",
-  "date": "2026-02-10T14:30:00Z",
-  "commit_sha": "abc123f",
-  "commit_message": "feat: add login endpoint",
-  "original_line": "    query = f\"SELECT * FROM users WHERE name='{username}'\""
+  "blame_entries": [
+    {
+      "line": 15,
+      "commit_sha": "abc1234",
+      "author": "dev@example.com",
+      "date": "2026-02-20T10:30:00Z",
+      "content": "    query = f\"SELECT * FROM users WHERE name='{username}'\""
+    }
+  ]
 }
 ```
 
 ---
 
-## 2. Structured Output Schema — ReviewVerdict
+### `get_pr_comments`
 
-**Purpose:** The Reporter agent's output format. Enforced via `CompletionArgs(response_format=...)`.
-
-### Pydantic Models (for `client.beta.agents.create` with `completion_args`)
-
-```python
-# Design reference — will be implemented as Pydantic models during hackathon
-
-class Finding:
-    file_path: str                    # e.g., "src/auth/login.py"
-    line_start: int                   # Starting line number
-    line_end: int | None              # Ending line (None if single line)
-    severity: str                     # "critical" | "warning" | "info" | "style"
-    category: str                     # "security" | "bug" | "performance" | "quality"
-    title: str                        # One-line summary, e.g., "SQL Injection vulnerability"
-    description: str                  # Detailed explanation
-    suggestion: str | None            # Recommended fix
-    verification_status: str          # "verified" | "likely" | "unverified" | "false_positive"
-    confidence: float                 # 0.0 to 1.0
-    code_snippet: str | None          # The problematic code
-
-class FileReview:
-    file_path: str                    # File path
-    language: str                     # Detected language
-    change_type: str                  # "added" | "modified" | "deleted"
-    findings: list[Finding]           # Findings for this file
-    positive_notes: list[str]         # Good things about the code
-
-class ReviewStats:
-    total_files_reviewed: int
-    total_findings: int
-    critical_count: int
-    warning_count: int
-    info_count: int
-    style_count: int
-    verified_count: int
-    false_positive_count: int
-
-class ReviewVerdict:
-    verdict: str                      # "approve" | "request_changes" | "comment"
-    summary: str                      # 2-3 sentence summary of the review
-    confidence: float                 # Overall confidence in the verdict (0.0-1.0)
-    files: list[FileReview]           # Per-file reviews
-    stats: ReviewStats                # Aggregate statistics
-    false_positives: list[Finding]    # Findings marked as false positives
-    recommendations: list[str]        # High-level recommendations
-    review_duration_ms: int | None    # How long the pipeline took
-```
-
-### JSON Schema (equivalent, for reference)
+Gets existing review comments to avoid duplicate feedback.
 
 ```json
 {
-  "name": "ReviewVerdict",
+  "type": "function",
+  "function": {
+    "name": "get_pr_comments",
+    "description": "Get existing review comments on the PR to avoid giving duplicate feedback.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "file_path": {
+          "type": "string",
+          "description": "Filter comments by file path (optional)"
+        }
+      },
+      "required": []
+    }
+  }
+}
+```
+
+**Return format:**
+```json
+{
+  "comments": [
+    {
+      "id": 1,
+      "file_path": "src/auth/login.py",
+      "line": 15,
+      "body": "This looks like a SQL injection risk",
+      "author": "reviewer1",
+      "created_at": "2026-02-28T12:00:00Z"
+    }
+  ]
+}
+```
+
+---
+
+## 2. Reporter Structured Output Schema (ReviewVerdict)
+
+This is the JSON schema for the Reporter's structured output using `completion_args.response_format`.
+
+### Pydantic Model (for SDK)
+
+```python
+from pydantic import BaseModel, Field
+from typing import List, Optional
+from enum import Enum
+
+class Severity(str, Enum):
+    CRITICAL = "critical"
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+    INFO = "info"
+
+class Category(str, Enum):
+    SECURITY = "security"
+    BUG = "bug"
+    PERFORMANCE = "performance"
+    STYLE = "style"
+    TEST_COVERAGE = "test_coverage"
+    DOCUMENTATION = "documentation"
+
+class VerificationStatus(str, Enum):
+    VERIFIED = "verified"
+    UNVERIFIED = "unverified"
+    SKIPPED = "skipped"
+
+class Verdict(str, Enum):
+    APPROVE = "APPROVE"
+    REQUEST_CHANGES = "REQUEST_CHANGES"
+    COMMENT = "COMMENT"
+
+class Finding(BaseModel):
+    id: str = Field(description="Unique finding identifier, e.g., F001")
+    severity: Severity
+    category: Category
+    file_path: str
+    start_line: int
+    end_line: int
+    title: str = Field(description="Short title of the finding")
+    description: str = Field(description="Detailed description of the issue")
+    code_snippet: Optional[str] = Field(default=None, description="Relevant code snippet")
+    suggested_fix: Optional[str] = Field(default=None, description="Suggested code fix")
+    verification: VerificationStatus
+    verification_evidence: Optional[str] = Field(default=None, description="Output from code interpreter verification")
+
+class CategorySummary(BaseModel):
+    category: Category
+    count: int
+    critical_count: int
+    high_count: int
+    medium_count: int
+    low_count: int
+    info_count: int
+
+class ReviewVerdict(BaseModel):
+    verdict: Verdict = Field(description="Overall review verdict")
+    confidence: float = Field(ge=0.0, le=1.0, description="Confidence score 0.0-1.0")
+    summary: str = Field(description="Human-readable summary, 2-3 sentences")
+    total_findings: int
+    findings: List[Finding]
+    category_summary: List[CategorySummary]
+    files_reviewed: List[str]
+    review_duration_seconds: Optional[float] = None
+    agents_used: List[str] = Field(default=["planner", "reviewer", "verifier", "reporter"])
+```
+
+### JSON Schema (for API)
+
+```json
+{
+  "name": "review_verdict",
   "schema": {
     "type": "object",
     "properties": {
       "verdict": {
         "type": "string",
-        "enum": ["approve", "request_changes", "comment"],
-        "description": "Overall review decision"
-      },
-      "summary": {
-        "type": "string",
-        "description": "2-3 sentence summary of the review findings"
+        "enum": ["APPROVE", "REQUEST_CHANGES", "COMMENT"]
       },
       "confidence": {
         "type": "number",
         "minimum": 0.0,
-        "maximum": 1.0,
-        "description": "Overall confidence in the verdict"
+        "maximum": 1.0
       },
-      "files": {
+      "summary": {
+        "type": "string"
+      },
+      "total_findings": {
+        "type": "integer"
+      },
+      "findings": {
         "type": "array",
         "items": {
           "type": "object",
           "properties": {
-            "file_path": { "type": "string" },
-            "language": { "type": "string" },
-            "change_type": {
+            "id": { "type": "string" },
+            "severity": {
               "type": "string",
-              "enum": ["added", "modified", "deleted"]
+              "enum": ["critical", "high", "medium", "low", "info"]
             },
-            "findings": {
-              "type": "array",
-              "items": {
-                "type": "object",
-                "properties": {
-                  "file_path": { "type": "string" },
-                  "line_start": { "type": "integer" },
-                  "line_end": { "type": ["integer", "null"] },
-                  "severity": {
-                    "type": "string",
-                    "enum": ["critical", "warning", "info", "style"]
-                  },
-                  "category": {
-                    "type": "string",
-                    "enum": ["security", "bug", "performance", "quality"]
-                  },
-                  "title": { "type": "string" },
-                  "description": { "type": "string" },
-                  "suggestion": { "type": ["string", "null"] },
-                  "verification_status": {
-                    "type": "string",
-                    "enum": ["verified", "likely", "unverified", "false_positive"]
-                  },
-                  "confidence": {
-                    "type": "number",
-                    "minimum": 0.0,
-                    "maximum": 1.0
-                  },
-                  "code_snippet": { "type": ["string", "null"] }
-                },
-                "required": ["file_path", "line_start", "severity", "category", "title", "description", "verification_status", "confidence"]
-              }
+            "category": {
+              "type": "string",
+              "enum": ["security", "bug", "performance", "style", "test_coverage", "documentation"]
             },
-            "positive_notes": {
-              "type": "array",
-              "items": { "type": "string" }
-            }
+            "file_path": { "type": "string" },
+            "start_line": { "type": "integer" },
+            "end_line": { "type": "integer" },
+            "title": { "type": "string" },
+            "description": { "type": "string" },
+            "code_snippet": { "type": "string" },
+            "suggested_fix": { "type": "string" },
+            "verification": {
+              "type": "string",
+              "enum": ["verified", "unverified", "skipped"]
+            },
+            "verification_evidence": { "type": "string" }
           },
-          "required": ["file_path", "language", "change_type", "findings", "positive_notes"]
+          "required": ["id", "severity", "category", "file_path", "start_line", "end_line", "title", "description", "verification"]
         }
       },
-      "stats": {
-        "type": "object",
-        "properties": {
-          "total_files_reviewed": { "type": "integer" },
-          "total_findings": { "type": "integer" },
-          "critical_count": { "type": "integer" },
-          "warning_count": { "type": "integer" },
-          "info_count": { "type": "integer" },
-          "style_count": { "type": "integer" },
-          "verified_count": { "type": "integer" },
-          "false_positive_count": { "type": "integer" }
-        },
-        "required": ["total_files_reviewed", "total_findings", "critical_count", "warning_count", "info_count", "style_count", "verified_count", "false_positive_count"]
-      },
-      "false_positives": {
+      "category_summary": {
         "type": "array",
-        "items": { "$ref": "#/properties/files/items/properties/findings/items" }
+        "items": {
+          "type": "object",
+          "properties": {
+            "category": { "type": "string" },
+            "count": { "type": "integer" },
+            "critical_count": { "type": "integer" },
+            "high_count": { "type": "integer" },
+            "medium_count": { "type": "integer" },
+            "low_count": { "type": "integer" },
+            "info_count": { "type": "integer" }
+          },
+          "required": ["category", "count", "critical_count", "high_count", "medium_count", "low_count", "info_count"]
+        }
       },
-      "recommendations": {
+      "files_reviewed": {
         "type": "array",
         "items": { "type": "string" }
       },
-      "review_duration_ms": { "type": ["integer", "null"] }
+      "review_duration_seconds": { "type": "number" },
+      "agents_used": {
+        "type": "array",
+        "items": { "type": "string" }
+      }
     },
-    "required": ["verdict", "summary", "confidence", "files", "stats", "false_positives", "recommendations"]
+    "required": ["verdict", "confidence", "summary", "total_findings", "findings", "category_summary", "files_reviewed", "agents_used"]
   }
 }
 ```
 
 ---
 
-## 3. API Endpoint Schemas
+## 3. Backend API Schemas
 
-### POST /api/review — Submit PR for review
+### POST /api/review — Request
 
-**Request:**
 ```json
 {
-  "diff_text": "unified diff string (optional if github_url provided)",
-  "github_url": "https://github.com/owner/repo/pull/123 (optional if diff_text provided)",
+  "pr_url": "https://github.com/owner/repo/pull/123",
   "options": {
     "focus_areas": ["security", "bugs"],
-    "severity_threshold": "info",
-    "include_style": true
+    "skip_style": false,
+    "max_files": 20
   }
 }
 ```
 
-**Response:**
+### POST /api/review — Response
+
 ```json
 {
-  "review_id": "uuid",
-  "status": "queued",
-  "created_at": "2026-02-28T10:00:00Z",
-  "stream_url": "/api/review/{review_id}/stream"
+  "review_id": "rev_abc123",
+  "status": "in_progress",
+  "stream_url": "/api/review/rev_abc123/stream"
 }
 ```
 
-### GET /api/review/{id}/stream — SSE Pipeline Progress
+### GET /api/review/:id/stream — SSE Events
 
-**Event types:**
 ```
-event: pipeline.started
-data: {"review_id": "uuid", "agent": "planner", "timestamp": "..."}
+event: agent_start
+data: {"agent": "planner", "timestamp": "2026-02-28T12:00:00Z"}
 
-event: agent.started
-data: {"agent": "planner", "model": "mistral-large-latest", "timestamp": "..."}
+event: agent_progress
+data: {"agent": "planner", "message": "Analyzing 5 changed files..."}
 
-event: tool.called
-data: {"agent": "planner", "tool": "web_search", "query": "...", "timestamp": "..."}
+event: handoff
+data: {"from": "planner", "to": "reviewer", "timestamp": "2026-02-28T12:00:15Z"}
 
-event: agent.handoff
-data: {"from": "planner", "to": "reviewer", "chunks_count": 5, "timestamp": "..."}
+event: function_call
+data: {"agent": "reviewer", "function": "get_file_context", "args": {"file_path": "src/auth/login.py"}}
 
-event: tool.called
-data: {"agent": "reviewer", "tool": "get_file_context", "args": {...}, "timestamp": "..."}
+event: finding
+data: {"id": "F001", "severity": "critical", "category": "security", "title": "SQL Injection in login()"}
 
-event: finding.detected
-data: {"agent": "reviewer", "severity": "critical", "title": "SQL Injection", "timestamp": "..."}
+event: agent_start
+data: {"agent": "verifier", "timestamp": "2026-02-28T12:01:00Z"}
 
-event: agent.handoff
-data: {"from": "reviewer", "to": "verifier", "findings_count": 7, "timestamp": "..."}
+event: verification
+data: {"finding_id": "F001", "status": "verified", "evidence": "..."}
 
-event: tool.called
-data: {"agent": "verifier", "tool": "code_interpreter", "action": "lint_check", "timestamp": "..."}
-
-event: finding.verified
-data: {"title": "SQL Injection", "status": "verified", "confidence": 0.95, "timestamp": "..."}
-
-event: agent.handoff
-data: {"from": "verifier", "to": "reporter", "verified_count": 5, "timestamp": "..."}
-
-event: pipeline.completed
-data: {"review_id": "uuid", "verdict": "request_changes", "duration_ms": 45000, "timestamp": "..."}
+event: complete
+data: <full ReviewVerdict JSON>
 ```
 
-### GET /api/review/{id} — Get Final Results
+### GET /api/review/:id — Response
 
-**Response:** Full `ReviewVerdict` JSON (see above).
-
----
-
-## 4. Frontend State Types
-
-```typescript
-// Design reference — TypeScript types for frontend
-
-type PipelineStage = 'idle' | 'planner' | 'reviewer' | 'verifier' | 'reporter' | 'complete' | 'error';
-
-interface PipelineEvent {
-  type: string;
-  data: Record<string, unknown>;
-  timestamp: string;
-}
-
-interface ReviewState {
-  reviewId: string | null;
-  stage: PipelineStage;
-  events: PipelineEvent[];
-  activeAgent: string | null;
-  activeTool: string | null;
-  findingsPreview: FindingPreview[];
-  verdict: ReviewVerdict | null;
-  error: string | null;
-}
-
-interface FindingPreview {
-  title: string;
-  severity: 'critical' | 'warning' | 'info' | 'style';
-  verified: boolean;
+```json
+{
+  "review_id": "rev_abc123",
+  "status": "complete",
+  "verdict": { ... },  // Full ReviewVerdict
+  "pipeline": {
+    "started_at": "2026-02-28T12:00:00Z",
+    "completed_at": "2026-02-28T12:02:30Z",
+    "agents": [
+      {"name": "planner", "duration_ms": 15000, "status": "complete"},
+      {"name": "reviewer", "duration_ms": 45000, "status": "complete", "function_calls": 3},
+      {"name": "verifier", "duration_ms": 60000, "status": "complete", "code_executions": 4},
+      {"name": "reporter", "duration_ms": 10000, "status": "complete"}
+    ]
+  }
 }
 ```
