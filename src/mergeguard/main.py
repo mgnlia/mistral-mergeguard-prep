@@ -1,14 +1,4 @@
-"""MergeGuard — CLI entry point.
-
-Parses command-line arguments, initializes the Mistral client, creates the
-agent pipeline, runs the handoff chain, and prints the final review report.
-
-Usage:
-    uv run python -m mergeguard --pr https://github.com/owner/repo/pull/123
-    uv run python -m mergeguard --diff path/to/changes.diff
-
-NOTE: This is scaffold code. No actual API calls are made.
-"""
+"""MergeGuard CLI entry point."""
 
 from __future__ import annotations
 
@@ -17,220 +7,163 @@ import json
 import os
 import re
 import sys
-from pathlib import Path
 
 from rich.console import Console
 from rich.panel import Panel
 from rich.syntax import Syntax
 
-from mergeguard.handoffs import PipelineAgents, create_pipeline, delete_pipeline
-from mergeguard.schemas import ReviewReport
-
 console = Console()
 
 
 def parse_pr_url(url: str) -> tuple[str, str, int]:
-    """Parse a GitHub PR URL into (owner, repo, pr_number).
+    """Extract owner, repo, and PR number from a GitHub PR URL.
 
-    Args:
-        url: GitHub PR URL like https://github.com/owner/repo/pull/123
-
-    Returns:
-        Tuple of (owner, repo, pr_number).
-
-    Raises:
-        ValueError: If the URL format is invalid.
+    Supports: https://github.com/owner/repo/pull/123
     """
-    pattern = r"https?://github\.com/([^/]+)/([^/]+)/pull/(\d+)"
-    match = re.match(pattern, url)
+    pattern = r"github\.com/([^/]+)/([^/]+)/pull/(\d+)"
+    match = re.search(pattern, url)
     if not match:
-        raise ValueError(
-            f"Invalid PR URL: {url}\n"
-            "Expected format: https://github.com/owner/repo/pull/123"
-        )
+        raise ValueError(f"Invalid GitHub PR URL: {url}")
     return match.group(1), match.group(2), int(match.group(3))
 
 
-def read_diff_file(path: str) -> str:
-    """Read a local diff file.
+def run_review(pr_url: str) -> dict:
+    """Run the full MergeGuard review pipeline on a PR.
 
-    Args:
-        path: Path to the diff file.
-
-    Returns:
-        The diff content as a string.
-
-    Raises:
-        FileNotFoundError: If the file doesn't exist.
+    Returns the ReviewReport as a dict.
     """
-    diff_path = Path(path)
-    if not diff_path.exists():
-        raise FileNotFoundError(f"Diff file not found: {path}")
-    return diff_path.read_text(encoding="utf-8")
+    from mistralai import Mistral
 
+    from mergeguard.handoffs import build_chain, teardown_chain
 
-def run_pipeline(client, agents: PipelineAgents, user_message: str) -> ReviewReport:
-    """Run the MergeGuard review pipeline.
-
-    Starts a conversation with the Planner agent, which triggers the
-    handoff chain: Planner → Reviewer → Verifier → Reporter.
-
-    Args:
-        client: Authenticated Mistral client.
-        agents: The pipeline agent IDs.
-        user_message: The initial message (PR URL or diff content).
-
-    Returns:
-        The final ReviewReport from the Reporter agent.
-    """
-    # Start a conversation with the Planner agent
-    response = client.beta.conversations.start(
-        agent_id=agents.planner_id,
-        inputs=user_message,
+    # Parse PR URL
+    owner, repo, pr_number = parse_pr_url(pr_url)
+    console.print(
+        f"[bold blue]MergeGuard[/] reviewing "
+        f"[green]{owner}/{repo}[/] PR [yellow]#{pr_number}[/]"
     )
 
-    # The conversation runs through all handoffs automatically.
-    # The final response comes from the Reporter agent as structured JSON.
-    report_data = json.loads(response.output)
-    return ReviewReport.model_validate(report_data)
+    # Initialize Mistral client
+    api_key = os.environ.get("MISTRAL_API_KEY")
+    if not api_key:
+        console.print("[red]Error:[/] MISTRAL_API_KEY environment variable not set")
+        sys.exit(1)
+
+    client = Mistral(api_key=api_key)
+
+    # Build the agent chain
+    console.print("[dim]Creating agent chain...[/]")
+    chain = build_chain(client)
+    console.print(
+        f"[dim]Chain ready: Planner({chain.planner_id[:8]}) → "
+        f"Reviewer({chain.reviewer_id[:8]}) → "
+        f"Verifier({chain.verifier_id[:8]}) → "
+        f"Reporter({chain.reporter_id[:8]})[/]"
+    )
+
+    try:
+        # Start conversation with the Planner (entry agent)
+        console.print("[bold]Starting review...[/]\n")
+
+        # TODO: During hackathon sprint, implement:
+        # 1. Create a conversation with the entry agent
+        # 2. Send the PR URL as user message
+        # 3. Handle function call responses (fetch_pr_diff, etc.)
+        # 4. Follow handoffs through the chain
+        # 5. Collect final structured output from Reporter
+
+        # Placeholder — will be implemented during the hackathon
+        response = client.beta.conversations.create(
+            agent_id=chain.entry_agent_id,
+            inputs=f"Please review this Pull Request: https://github.com/{owner}/{repo}/pull/{pr_number}",
+        )
+
+        # Parse the final JSON report from the Reporter
+        report = json.loads(response.outputs[-1].content)
+        return report
+
+    finally:
+        # Cleanup agents
+        console.print("\n[dim]Cleaning up agents...[/]")
+        teardown_chain(client, chain)
 
 
-def print_report(report: ReviewReport) -> None:
-    """Pretty-print the review report to the console."""
-    # Header
-    emoji = "✅" if report.recommendation.value == "approve" else "❌"
+def display_report(report: dict) -> None:
+    """Pretty-print the review report."""
     console.print()
     console.print(
         Panel(
-            f"[bold]{emoji} {report.recommendation.value.upper()}[/bold]  —  "
-            f"Score: [bold]{report.overall_score}/100[/bold]  |  "
-            f"Files: {report.files_reviewed}  |  Issues: {report.total_issues}",
-            title="[bold blue]MergeGuard Review Report[/bold blue]",
+            report.get("summary", "No summary"),
+            title="[bold]Review Summary[/]",
             border_style="blue",
         )
     )
 
-    # Summary
-    console.print(f"\n[bold]Summary:[/bold] {report.summary}\n")
+    score = report.get("overall_score", 0)
+    rec = report.get("recommendation", "unknown")
+    score_color = "green" if score >= 80 else "yellow" if score >= 50 else "red"
+    rec_color = "green" if rec == "approve" else "red"
 
-    # Comments
-    if report.comments:
-        console.print("[bold]Issues Found:[/bold]\n")
-        for i, comment in enumerate(report.comments, 1):
-            severity_colors = {
-                "critical": "red",
+    console.print(
+        f"\n  Score: [{score_color}]{score}/100[/]  |  "
+        f"Recommendation: [{rec_color}]{rec}[/]\n"
+    )
+
+    comments = report.get("comments", [])
+    if comments:
+        console.print(f"[bold]Comments ({len(comments)}):[/]\n")
+        for c in comments:
+            sev = c.get("severity", "info")
+            sev_colors = {
+                "critical": "red bold",
                 "warning": "yellow",
                 "suggestion": "cyan",
                 "nitpick": "dim",
             }
-            color = severity_colors.get(comment.severity.value, "white")
-            verified_mark = " ✓" if comment.verified else ""
-
+            color = sev_colors.get(sev, "white")
             console.print(
-                f"  [{color}]{i}. [{comment.severity.value.upper()}][/{color}]"
-                f"{verified_mark}  {comment.file}"
-                f"{f':{comment.line}' if comment.line else ''}"
+                f"  [{color}][{sev.upper()}][/] "
+                f"{c.get('file', '?')}:{c.get('line', '?')} — "
+                f"{c.get('message', '')}"
             )
-            console.print(f"     {comment.message}")
-            if comment.suggestion:
-                console.print(f"     [dim]→ {comment.suggestion}[/dim]")
-            console.print()
+            if c.get("suggestion"):
+                console.print(f"    [dim]→ {c['suggestion']}[/]")
     else:
-        console.print("[green]No issues found! 🎉[/green]\n")
-
-    # JSON output
-    console.print("[bold]Raw JSON Report:[/bold]")
-    json_str = report.model_dump_json(indent=2)
-    console.print(Syntax(json_str, "json", theme="monokai"))
+        console.print("[green]No issues found — clean PR! 🎉[/]")
 
 
 def main() -> None:
-    """Main entry point for MergeGuard CLI."""
+    """CLI entry point."""
     parser = argparse.ArgumentParser(
         prog="mergeguard",
-        description="MergeGuard — Multi-agent code review pipeline using Mistral Agents API",
-    )
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument(
-        "--pr",
-        type=str,
-        help="GitHub PR URL (e.g., https://github.com/owner/repo/pull/123)",
-    )
-    group.add_argument(
-        "--diff",
-        type=str,
-        help="Path to a local diff file",
+        description="MergeGuard — AI-powered multi-agent code review",
     )
     parser.add_argument(
-        "--api-key",
-        type=str,
-        default=None,
-        help="Mistral API key (defaults to MISTRAL_API_KEY env var)",
+        "pr_url",
+        help="GitHub PR URL (e.g., https://github.com/owner/repo/pull/123)",
     )
     parser.add_argument(
         "--json",
         action="store_true",
-        help="Output raw JSON only (no pretty printing)",
+        help="Output raw JSON report instead of formatted display",
     )
 
     args = parser.parse_args()
 
-    # Resolve API key
-    api_key = args.api_key or os.environ.get("MISTRAL_API_KEY")
-    if not api_key:
-        console.print(
-            "[red]Error: No API key provided. Set MISTRAL_API_KEY or use --api-key.[/red]"
-        )
-        sys.exit(1)
-
-    # Build user message
-    if args.pr:
-        owner, repo, pr_number = parse_pr_url(args.pr)
-        user_message = (
-            f"Please review this pull request:\n"
-            f"Repository: {owner}/{repo}\n"
-            f"PR Number: {pr_number}\n"
-            f"URL: {args.pr}"
-        )
-        console.print(f"[blue]Reviewing PR: {args.pr}[/blue]")
-    else:
-        diff_content = read_diff_file(args.diff)
-        user_message = (
-            f"Please review this diff:\n\n```diff\n{diff_content}\n```"
-        )
-        console.print(f"[blue]Reviewing diff: {args.diff}[/blue]")
-
-    # Initialize Mistral client
-    # NOTE: Scaffold only — this import would fail without the mistralai package installed
-    console.print("[yellow]⚠ SCAFFOLD MODE — no actual API calls will be made[/yellow]")
-    console.print("[dim]To run for real, install dependencies with: uv sync[/dim]\n")
-
     try:
-        from mistralai import Mistral
-
-        client = Mistral(api_key=api_key)
-    except ImportError:
-        console.print("[red]mistralai package not installed. Run: uv sync[/red]")
-        sys.exit(1)
-
-    # Create pipeline and run
-    console.print("[blue]Creating agent pipeline...[/blue]")
-    agents = create_pipeline(client)
-
-    console.print("[blue]Running review pipeline (Planner → Reviewer → Verifier → Reporter)...[/blue]")
-    try:
-        report = run_pipeline(client, agents, user_message)
+        report = run_review(args.pr_url)
 
         if args.json:
-            print(report.model_dump_json(indent=2))
+            console.print_json(json.dumps(report, indent=2))
         else:
-            print_report(report)
-    finally:
-        # Clean up agents
-        console.print("[dim]Cleaning up agents...[/dim]")
-        delete_pipeline(client, agents)
+            display_report(report)
 
-    console.print("[green]Done![/green]")
+    except ValueError as e:
+        console.print(f"[red]Error:[/] {e}")
+        sys.exit(1)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Review cancelled.[/]")
+        sys.exit(130)
 
 
 if __name__ == "__main__":

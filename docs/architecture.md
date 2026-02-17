@@ -1,193 +1,145 @@
-# MergeGuard — Architecture
+# MergeGuard Architecture
 
 ## Overview
 
-MergeGuard is a **multi-agent code review pipeline** built on the Mistral Agents API. Four specialized agents collaborate through Mistral's native Handoff mechanism to produce a comprehensive, structured code review for any pull request.
+MergeGuard is a 4-agent pipeline that performs automated code review on GitHub Pull Requests. Each agent specializes in one phase of the review process and hands off to the next via Mistral's Handoffs API.
 
-The pipeline is fully autonomous once triggered: no external orchestrator, no polling loops, no manual intervention. Mistral's Agents API manages the entire conversation flow through handoffs.
-
----
-
-## Agent Pipeline
+## Agent Chain
 
 ### 1. Planner Agent
 
-**Role:** Receives the PR input and creates a structured review plan.
+**Role:** Receive a PR URL, fetch the diff, and produce a structured review plan.
 
-**Inputs:**
-- PR URL (via CLI) or local diff path
-
-**Function Tools:**
-- `fetch_pr_diff` — Calls the GitHub API to retrieve the unified diff for a pull request
-- `list_changed_files` — Extracts the list of changed files with change types (added, modified, deleted) and line counts
-
-**Behavior:**
-1. Receives the PR URL or diff content from the user message
-2. Calls `fetch_pr_diff` to retrieve the raw diff (if PR URL provided)
-3. Calls `list_changed_files` to get a structured file list
-4. Analyzes the scope of changes: which files, what kind of changes, estimated complexity
-5. Creates a prioritized review task list — ordering files by risk (e.g., core logic > tests > config)
-6. Hands off to the **Reviewer Agent** with the diff content and task list
-
-**Model:** `devstral-small-latest`
-
----
+- **Model:** `mistral-large-latest`
+- **Tools:** `fetch_pr_diff` (function), `list_changed_files` (function)
+- **Input:** PR URL from user
+- **Output:** Review plan — list of files to review, priority order, areas of concern
+- **Handoff:** → Reviewer Agent (passes review plan + diff context)
 
 ### 2. Reviewer Agent
 
-**Role:** Performs detailed code review on each changed file.
+**Role:** Perform detailed code review on each changed file.
 
-**Inputs (from Planner handoff):**
-- PR diff content
-- Prioritized review task list
-
-**Function Tools:**
-- `read_file` — Reads the full content of a file from the repository (for context beyond the diff)
-- `check_style` — Runs basic style/lint checks on a code snippet and returns violations
-
-**Behavior:**
-1. Iterates through the task list from the Planner
-2. For each file/change:
-   - Reads the full file content via `read_file` for surrounding context
-   - Analyzes the diff hunks for correctness, style, security, performance
-   - Calls `check_style` on modified code sections
-   - Produces review comments with file path, line number, severity, message, and suggested fix
-3. Compiles all review comments into a structured list
-4. Hands off to the **Verifier Agent** with the review comments and relevant code snippets
-
-**Model:** `devstral-small-latest`
-
----
+- **Model:** `devstral-latest` (code-specialized)
+- **Tools:** `read_file` (function), `check_style` (function)
+- **Input:** Review plan from Planner
+- **Output:** List of review comments (file, line, severity, message, suggestion)
+- **Handoff:** → Verifier Agent (passes review comments)
 
 ### 3. Verifier Agent
 
-**Role:** Validates the Reviewer's suggestions by executing code.
+**Role:** Validate the Reviewer's suggestions by running code analysis.
 
-**Inputs (from Reviewer handoff):**
-- Review comments with suggested fixes
-- Relevant code snippets
+- **Model:** `devstral-latest`
+- **Tools:** `code_interpreter` (built-in)
+- **Input:** Review comments from Reviewer
+- **Output:** Verified comments — each marked as confirmed/rejected with evidence
+- **Handoff:** → Reporter Agent (passes verified comments)
 
-**Tools:**
-- `code_interpreter` (Mistral built-in) — Executes Python code in a sandboxed environment
-
-**Behavior:**
-1. Receives the review comments and code snippets from the Reviewer
-2. For each actionable suggestion:
-   - Writes a small test or lint check in the code interpreter
-   - Runs the original code snippet to reproduce the issue (if applicable)
-   - Runs the suggested fix to verify it resolves the issue
-   - Marks the suggestion as `verified`, `unverified`, or `invalid`
-3. Filters out invalid suggestions to reduce noise
-4. Hands off to the **Reporter Agent** with verified review comments
-
-**Model:** `devstral-small-latest`
-
----
+The Verifier uses code_interpreter to:
+- Run linting on suggested fixes
+- Test that code snippets compile/parse correctly
+- Verify style suggestions match project conventions
+- Check for false positives in the Reviewer's output
 
 ### 4. Reporter Agent
 
-**Role:** Aggregates all findings into the final structured review report.
+**Role:** Aggregate all findings into a final structured review report.
 
-**Inputs (from Verifier handoff):**
-- Verified review comments
+- **Model:** `mistral-large-latest`
+- **Tools:** None (output only)
+- **Output format:** Structured JSON via `response_format` with JSON schema
+- **Input:** Verified comments from Verifier
+- **Output:** `ReviewReport` JSON — summary, scored comments, overall score, recommendation
 
-**Output Format:**
-- Uses `response_format` with a JSON schema (see `schemas.py`) to guarantee structured output
-
-**Behavior:**
-1. Receives the verified review comments from the Verifier
-2. Aggregates comments by file and severity
-3. Computes an overall quality score (0–100) based on severity distribution
-4. Determines a recommendation: `approve` or `request_changes`
-5. Writes a human-readable summary paragraph
-6. Returns the final `ReviewReport` as structured JSON
-
-**Model:** `devstral-small-latest`
-
-**Completion Args:**
-```python
-response_format = {
-    "type": "json_schema",
-    "json_schema": {
-        "name": "ReviewReport",
-        "schema": ReviewReport.model_json_schema()
-    }
-}
-```
-
----
-
-## Handoff Chain
+## Handoff Flow
 
 ```
-User Message (PR URL)
-        │
-        ▼
+User Input (PR URL)
+       │
+       ▼
    ┌─────────┐
-   │ Planner  │──── fetch_pr_diff(), list_changed_files()
+   │ Planner │──── fetch_pr_diff(), list_changed_files()
    └────┬────┘
-        │ handoff (diff + task list)
+        │ handoff (review plan + diff)
         ▼
    ┌──────────┐
-   │ Reviewer  │──── read_file(), check_style()
+   │ Reviewer │──── read_file(), check_style()
    └────┬─────┘
-        │ handoff (review comments + code)
+        │ handoff (review comments)
         ▼
    ┌──────────┐
-   │ Verifier  │──── code_interpreter
+   │ Verifier │──── code_interpreter
    └────┬─────┘
         │ handoff (verified comments)
         ▼
    ┌──────────┐
-   │ Reporter  │──── response_format (JSON schema)
+   │ Reporter │──── structured output (JSON schema)
    └────┬─────┘
         │
         ▼
-   ReviewReport (JSON)
+   ReviewReport JSON
 ```
 
-Handoffs are configured via `client.beta.agents.update()` after all agents are created:
+## Mistral API Usage
 
+### Agent Creation
 ```python
-client.beta.agents.update(planner_id,   handoffs=[reviewer_id])
-client.beta.agents.update(reviewer_id,  handoffs=[verifier_id])
-client.beta.agents.update(verifier_id,  handoffs=[reporter_id])
-# Reporter has no handoffs — it produces the final output
+agent = client.beta.agents.create(
+    model="mistral-large-latest",
+    name="Planner",
+    instructions="...",  # loaded from agents/planner.md
+    tools=[{
+        "type": "function",
+        "function": {
+            "name": "fetch_pr_diff",
+            "description": "Fetch the diff for a GitHub PR",
+            "parameters": { ... }
+        }
+    }],
+    completion_args={"temperature": 0.3}
+)
 ```
 
----
+### Handoff Setup
+```python
+# After creating all agents:
+client.beta.agents.update(
+    agent_id=planner.id,
+    handoffs=[reviewer.id]
+)
+client.beta.agents.update(
+    agent_id=reviewer.id,
+    handoffs=[verifier.id]
+)
+client.beta.agents.update(
+    agent_id=verifier.id,
+    handoffs=[reporter.id]
+)
+```
 
-## Mistral Features Used
+### Structured Output (Reporter)
+```python
+reporter = client.beta.agents.create(
+    model="mistral-large-latest",
+    name="Reporter",
+    instructions="...",
+    response_format={
+        "type": "json_schema",
+        "json_schema": {
+            "name": "ReviewReport",
+            "schema": { ... }  # from schemas.py
+        }
+    }
+)
+```
 
-### Agents API
-All four agents are created via `client.beta.agents.create()` with distinct system prompts, tools, and configurations. Each agent is a persistent, stateful entity on the Mistral platform.
+## Differentiation
 
-### Handoffs
-The core orchestration mechanism. Each agent's `handoffs` field points to the next agent in the chain. When an agent finishes its work, it hands off control (and conversation context) to the next agent automatically.
+What makes MergeGuard stand out from typical chatbot submissions:
 
-### Function Calling
-Custom function tools with JSON Schema definitions:
-- `fetch_pr_diff` — GitHub API integration
-- `read_file` — Repository file access
-- `list_changed_files` — PR file enumeration
-- `check_style` — Code style validation
-
-### Code Interpreter
-The Verifier agent uses Mistral's built-in `code_interpreter` tool to execute Python code in a sandboxed environment — validating suggestions, running linters, and testing code snippets.
-
-### Structured Output
-The Reporter agent uses `response_format` with a JSON schema derived from Pydantic models to guarantee the final output conforms to the `ReviewReport` schema.
-
-### Devstral Model
-All agents use `devstral-small-latest` — Mistral's code-optimized model — for superior performance on code understanding, review, and generation tasks.
-
----
-
-## Data Flow
-
-| Stage | Input | Output | Tools |
-|---|---|---|---|
-| **Planner** | PR URL or diff path | Diff content + prioritized task list | `fetch_pr_diff`, `list_changed_files` |
-| **Reviewer** | Diff + task list | Review comments (file, line, severity, message, suggestion) | `read_file`, `check_style` |
-| **Verifier** | Review comments + code | Verified review comments (with verification status) | `code_interpreter` |
-| **Reporter** | Verified comments | `ReviewReport` JSON (summary, comments, score, recommendation) | `response_format` |
+1. **Real-world utility** — solves actual PR review bottleneck that every dev team faces
+2. **Deep Agents API usage** — uses 6+ Mistral features (Agents, Handoffs, Function Calling, Code Interpreter, Structured Output, Devstral)
+3. **Verifier agent** — unique validation step that catches false positives, demonstrating agent self-correction
+4. **Structured output** — machine-readable JSON report, not just chat text
+5. **Dev-tool judges love** — judges are developers who immediately understand the value

@@ -1,12 +1,4 @@
-"""Agent creation functions for MergeGuard.
-
-Each function creates one agent via the Mistral Agents API using
-`client.beta.agents.create()`. Agents are configured with their
-system prompt (loaded from agents/*.md), tools, model, and
-completion_args where needed.
-
-NOTE: This is scaffold code. No actual API calls are made.
-"""
+"""Agent creation for MergeGuard pipeline."""
 
 from __future__ import annotations
 
@@ -14,125 +6,84 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from mergeguard.schemas import ReviewReport
-from mergeguard.tools import PLANNER_TOOLS, REVIEWER_TOOLS
+from mergeguard.tools import (
+    PLANNER_TOOLS,
+    REPORTER_TOOLS,
+    REVIEWER_TOOLS,
+    VERIFIER_TOOLS,
+)
 
 if TYPE_CHECKING:
     from mistralai import Mistral
 
-# Path to agent prompt files (relative to project root)
-PROMPTS_DIR = Path(__file__).resolve().parent.parent.parent / "agents"
+# ── Prompt loading ─────────────────────────────────────────────────────
 
-MODEL = "devstral-small-latest"
-
-
-def _load_prompt(agent_name: str) -> str:
-    """Load a system prompt from agents/<name>.md."""
-    prompt_path = PROMPTS_DIR / f"{agent_name}.md"
-    return prompt_path.read_text(encoding="utf-8")
+AGENTS_DIR = Path(__file__).resolve().parent.parent.parent / "agents"
 
 
-def create_planner_agent(client: Mistral) -> str:
-    """Create the Planner agent.
+def _load_prompt(name: str) -> str:
+    """Load an agent's system prompt from agents/<name>.md."""
+    prompt_path = AGENTS_DIR / f"{name}.md"
+    if not prompt_path.exists():
+        raise FileNotFoundError(f"Agent prompt not found: {prompt_path}")
+    return prompt_path.read_text()
 
-    The Planner receives the PR input, fetches the diff, analyzes changes,
-    and creates a prioritized review task list.
 
-    Tools: fetch_pr_diff, list_changed_files
-    Handoffs: → Reviewer (configured separately in handoffs.py)
+# ── Agent factories ────────────────────────────────────────────────────
 
-    Returns:
-        The agent ID.
-    """
-    instructions = _load_prompt("planner")
 
-    agent = client.beta.agents.create(
-        model=MODEL,
-        name="MergeGuard Planner",
-        description="Analyzes PR diffs and creates prioritized review task lists",
-        instructions=instructions,
+def create_planner(client: Mistral) -> object:
+    """Create the Planner agent — parses PR and builds review plan."""
+    return client.beta.agents.create(
+        model="mistral-large-latest",
+        name="MergeGuard-Planner",
+        description="Analyzes PR diffs and creates a structured review plan.",
+        instructions=_load_prompt("planner"),
         tools=PLANNER_TOOLS,
+        completion_args={"temperature": 0.2},
     )
-    return agent.id
 
 
-def create_reviewer_agent(client: Mistral) -> str:
-    """Create the Reviewer agent.
-
-    The Reviewer performs detailed code review on each changed file,
-    checking for correctness, security, performance, maintainability,
-    and style issues.
-
-    Tools: read_file, check_style
-    Handoffs: → Verifier (configured separately in handoffs.py)
-
-    Returns:
-        The agent ID.
-    """
-    instructions = _load_prompt("reviewer")
-
-    agent = client.beta.agents.create(
-        model=MODEL,
-        name="MergeGuard Reviewer",
-        description="Performs detailed code review and produces structured comments",
-        instructions=instructions,
+def create_reviewer(client: Mistral) -> object:
+    """Create the Reviewer agent — performs detailed code review."""
+    return client.beta.agents.create(
+        model="devstral-latest",
+        name="MergeGuard-Reviewer",
+        description="Reviews code changes and produces detailed comments.",
+        instructions=_load_prompt("reviewer"),
         tools=REVIEWER_TOOLS,
+        completion_args={"temperature": 0.3},
     )
-    return agent.id
 
 
-def create_verifier_agent(client: Mistral) -> str:
-    """Create the Verifier agent.
-
-    The Verifier validates review suggestions by executing code in the
-    code interpreter — running linters, test snippets, and benchmarks.
-
-    Tools: code_interpreter (Mistral built-in)
-    Handoffs: → Reporter (configured separately in handoffs.py)
-
-    Returns:
-        The agent ID.
-    """
-    instructions = _load_prompt("verifier")
-
-    agent = client.beta.agents.create(
-        model=MODEL,
-        name="MergeGuard Verifier",
-        description="Validates review suggestions via code execution",
-        instructions=instructions,
-        tools=[{"type": "code_interpreter"}],
+def create_verifier(client: Mistral) -> object:
+    """Create the Verifier agent — validates review suggestions."""
+    return client.beta.agents.create(
+        model="devstral-latest",
+        name="MergeGuard-Verifier",
+        description="Validates review comments using code execution.",
+        instructions=_load_prompt("verifier"),
+        tools=VERIFIER_TOOLS,
+        completion_args={"temperature": 0.1},
     )
-    return agent.id
 
 
-def create_reporter_agent(client: Mistral) -> str:
-    """Create the Reporter agent.
+def create_reporter(client: Mistral) -> object:
+    """Create the Reporter agent — produces structured JSON report."""
+    report_schema = ReviewReport.model_json_schema()
 
-    The Reporter aggregates verified findings into a structured JSON
-    review report. Uses response_format to guarantee schema conformance.
-
-    Tools: none (output-only)
-    Handoffs: none (final agent in the chain)
-    Completion args: response_format with ReviewReport JSON schema
-
-    Returns:
-        The agent ID.
-    """
-    instructions = _load_prompt("reporter")
-
-    agent = client.beta.agents.create(
-        model=MODEL,
-        name="MergeGuard Reporter",
-        description="Aggregates findings into a structured JSON review report",
-        instructions=instructions,
-        tools=[],
-        completion_args={
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "ReviewReport",
-                    "schema": ReviewReport.model_json_schema(),
-                },
+    return client.beta.agents.create(
+        model="mistral-large-latest",
+        name="MergeGuard-Reporter",
+        description="Aggregates findings into a structured review report.",
+        instructions=_load_prompt("reporter"),
+        tools=REPORTER_TOOLS,
+        completion_args={"temperature": 0.1},
+        response_format={
+            "type": "json_schema",
+            "json_schema": {
+                "name": "ReviewReport",
+                "schema": report_schema,
             },
         },
     )
-    return agent.id

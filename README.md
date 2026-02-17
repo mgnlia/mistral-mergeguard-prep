@@ -1,71 +1,35 @@
 # MergeGuard
 
-**Multi-agent code review pipeline using Mistral Agents API**
+**Multi-agent code review pipeline** built with the [Mistral Agents API](https://docs.mistral.ai/capabilities/agents/).
 
-Built for the [Mistral Worldwide Hackathon 2026](https://mistral.ai) — targeting the **"Best Use of Agent Skills"** award.
-
-MergeGuard orchestrates 4 specialized AI agents that review pull requests end-to-end: from analyzing the diff, to reviewing each change, verifying suggestions with real code execution, and producing a structured final report. The agents communicate through Mistral's native **Handoffs** mechanism — no external orchestrator needed.
-
----
+> Built for the [Mistral Worldwide Hackathon 2026](https://worldwide-hackathon.mistral.ai/) — targeting **Best Use of Agent Skills**.
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        MergeGuard Pipeline                         │
-│                                                                     │
-│   PR URL / Diff                                                     │
-│        │                                                            │
-│        ▼                                                            │
-│  ┌───────────┐   handoff   ┌────────────┐   handoff   ┌──────────┐│
-│  │  PLANNER  │ ──────────► │  REVIEWER   │ ──────────► │ VERIFIER ││
-│  │   Agent   │             │   Agent     │             │  Agent   ││
-│  └───────────┘             └────────────┘             └──────────┘│
-│        │                         │                          │      │
-│   Uses:                     Uses:                      Uses:      │
-│   • fetch_pr_diff           • read_file                • code_    │
-│   • list_changed_files      • check_style                interpreter│
-│                                                             │      │
-│                                                    handoff  │      │
-│                                                             ▼      │
-│                                                      ┌──────────┐ │
-│                                                      │ REPORTER │ │
-│                                                      │  Agent   │ │
-│                                                      └──────────┘ │
-│                                                             │      │
-│                                                        Uses:      │
-│                                                   • structured    │
-│                                                     JSON output   │
-│                                                             │      │
-│                                                             ▼      │
-│                                                    ┌──────────────┐│
-│                                                    │ ReviewReport ││
-│                                                    │    (JSON)    ││
-│                                                    └──────────────┘│
-└─────────────────────────────────────────────────────────────────────┘
-```
-
-### Handoff Flow
-
-```
-Planner ──► Reviewer ──► Verifier ──► Reporter ──► Structured JSON Report
-   │            │             │             │
-   │            │             │             └─ response_format (JSON schema)
-   │            │             └─ code_interpreter (lint, test snippets)
-   │            └─ function tools (read_file, check_style)
-   └─ function tools (fetch_pr_diff, list_changed_files)
+┌─────────────┐    handoff    ┌──────────────┐    handoff    ┌──────────────┐    handoff    ┌──────────────┐
+│   Planner   │ ──────────▶  │   Reviewer   │ ──────────▶  │   Verifier   │ ──────────▶  │   Reporter   │
+│             │              │              │              │              │              │              │
+│ • Parse PR  │              │ • Review code│              │ • Validate   │              │ • Aggregate  │
+│ • Identify  │              │ • Find bugs  │              │   suggestions│              │ • Score      │
+│   changes   │              │ • Style check│              │ • Run linter │              │ • JSON report│
+│ • Plan tasks│              │ • Suggest fix│              │ • Test code  │              │ • Recommend  │
+└─────────────┘              └──────────────┘              └──────────────┘              └──────────────┘
+  Function tools               Function tools               code_interpreter              structured output
+  (fetch_pr_diff,              (read_file,                   (validation)                  (response_format)
+   list_changed_files)          check_style)
 ```
 
 ## Mistral Features Used
 
-| Feature | Where |
-|---|---|
-| **Agents API** | All 4 agents created via `client.beta.agents.create()` |
-| **Handoffs** | Chain: Planner → Reviewer → Verifier → Reporter |
-| **Function Calling** | `fetch_pr_diff`, `read_file`, `list_changed_files`, `check_style` |
-| **Code Interpreter** | Verifier agent runs linting & test snippets |
-| **Structured Output** | Reporter agent uses `response_format` with JSON schema |
-| **Devstral Model** | Code-optimized model for all agents |
+| Feature | Agent | Usage |
+|---------|-------|-------|
+| **Agents API** | All | `client.beta.agents.create()` |
+| **Handoffs** | All | Sequential agent chain via `handoffs=[agent_id]` |
+| **Function Calling** | Planner, Reviewer | Custom tools for GitHub PR interaction |
+| **Code Interpreter** | Verifier | Run linting/validation on code snippets |
+| **Structured Output** | Reporter | JSON schema for review report |
+| **Devstral** | Reviewer, Verifier | Code-specialized model |
 
 ## Quick Start
 
@@ -73,32 +37,28 @@ Planner ──► Reviewer ──► Verifier ──► Reporter ──► Struc
 # Install dependencies
 uv sync
 
-# Run a review (scaffold — no actual API calls yet)
-uv run python -m mergeguard --pr https://github.com/owner/repo/pull/123
-
-# Or with a local diff
-uv run python -m mergeguard --diff path/to/changes.diff
+# Run on a PR (requires MISTRAL_API_KEY and GITHUB_TOKEN)
+uv run mergeguard https://github.com/owner/repo/pull/123
 ```
 
 ## Project Structure
 
 ```
-├── agents/                # Agent system prompts
+├── agents/              # System prompts for each agent
 │   ├── planner.md
 │   ├── reviewer.md
 │   ├── verifier.md
 │   └── reporter.md
 ├── docs/
-│   └── architecture.md   # Detailed architecture doc
+│   └── architecture.md  # Detailed architecture doc
 ├── src/mergeguard/
 │   ├── __init__.py
-│   ├── main.py            # CLI entry point
-│   ├── agents.py          # Agent creation functions
-│   ├── handoffs.py        # Handoff chain setup
-│   ├── tools.py           # Function tool definitions
-│   └── schemas.py         # Pydantic models for structured output
-├── pyproject.toml
-└── README.md
+│   ├── main.py          # CLI entry point
+│   ├── agents.py        # Agent creation
+│   ├── handoffs.py      # Handoff chain setup
+│   ├── tools.py         # Function tool definitions
+│   └── schemas.py       # Pydantic output models
+└── pyproject.toml
 ```
 
 ## License

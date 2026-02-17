@@ -1,82 +1,71 @@
-"""Pydantic models for MergeGuard structured output.
-
-These schemas define the structured JSON output format used by the Reporter agent
-via Mistral's response_format feature.
-"""
+"""Pydantic models for MergeGuard structured output."""
 
 from __future__ import annotations
 
 from enum import Enum
-from typing import Optional
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
 
 class Severity(str, Enum):
-    """Review comment severity levels."""
-
-    CRITICAL = "critical"
-    WARNING = "warning"
-    SUGGESTION = "suggestion"
-    NITPICK = "nitpick"
+    critical = "critical"
+    warning = "warning"
+    suggestion = "suggestion"
+    nitpick = "nitpick"
 
 
-class Category(str, Enum):
-    """Review comment categories."""
-
-    CORRECTNESS = "correctness"
-    SECURITY = "security"
-    PERFORMANCE = "performance"
-    MAINTAINABILITY = "maintainability"
-    STYLE = "style"
-
-
-class Recommendation(str, Enum):
-    """Final review recommendation."""
-
-    APPROVE = "approve"
-    REQUEST_CHANGES = "request_changes"
+class VerificationStatus(str, Enum):
+    confirmed = "confirmed"
+    modified = "modified"
+    rejected = "rejected"
+    unverified = "unverified"
 
 
 class ReviewComment(BaseModel):
-    """A single review comment on a specific file/line."""
+    """A single review comment on a specific file and line."""
 
     file: str = Field(description="File path relative to repo root")
-    line: Optional[int] = Field(
-        default=None, description="Line number in the file (null if file-level comment)"
-    )
+    line: int = Field(description="Line number in the file")
     severity: Severity = Field(description="Issue severity level")
-    category: Category = Field(description="Issue category")
-    message: str = Field(description="Clear description of the issue found")
-    suggestion: Optional[str] = Field(
-        default=None, description="Concrete code fix or improvement suggestion"
+    message: str = Field(description="Description of the issue")
+    suggestion: str = Field(default="", description="Recommended fix or improvement")
+    verification_status: VerificationStatus = Field(
+        default=VerificationStatus.unverified,
+        description="Whether the Verifier confirmed this comment",
     )
-    verified: bool = Field(
-        default=False,
-        description="Whether the Verifier agent confirmed this issue via code execution",
-    )
+
+
+class ReviewStats(BaseModel):
+    """Aggregate statistics for the review."""
+
+    files_reviewed: int = 0
+    total_comments: int = 0
+    critical: int = 0
+    warnings: int = 0
+    suggestions: int = 0
+    nitpicks: int = 0
 
 
 class ReviewReport(BaseModel):
     """Final structured review report produced by the Reporter agent."""
 
-    summary: str = Field(
-        description="Human-readable 2-4 sentence summary of the review"
-    )
-    comments: list[ReviewComment] = Field(
-        default_factory=list, description="All review comments, ordered by severity"
-    )
+    summary: str = Field(description="2-3 sentence overview of the review")
+    comments: list[ReviewComment] = Field(default_factory=list)
     overall_score: int = Field(
-        ge=0,
-        le=100,
-        description="Overall quality score from 0 (worst) to 100 (best)",
+        ge=0, le=100, description="Quality score from 0 (worst) to 100 (best)"
     )
-    recommendation: Recommendation = Field(
-        description="Final recommendation: approve or request_changes"
+    recommendation: Literal["approve", "request_changes"] = Field(
+        description="Final recommendation"
     )
-    files_reviewed: int = Field(
-        ge=0, description="Total number of files reviewed"
-    )
-    total_issues: int = Field(
-        ge=0, description="Total number of issues found across all files"
-    )
+    stats: ReviewStats = Field(default_factory=ReviewStats)
+
+    def to_json_schema(self) -> dict:
+        """Return JSON schema for use with Mistral response_format."""
+        return {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "ReviewReport",
+                "schema": self.model_json_schema(),
+            },
+        }

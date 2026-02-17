@@ -10,6 +10,9 @@ dependencies = [
     "pydantic>=2.0.0",
 ]
 
+[project.scripts]
+mergeguard = "mergeguard.main:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
