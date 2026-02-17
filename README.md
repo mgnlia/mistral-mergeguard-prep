@@ -1,48 +1,106 @@
-# MergeGuard — Pre-Hackathon Prep
+# MergeGuard
 
-> **⚠️ This repo contains DESIGN DOCUMENTS ONLY — no production code.**
-> All code will be written during the 48h hackathon window (Feb 28–Mar 1, 2026).
+**Multi-agent code review pipeline using Mistral Agents API**
 
-## What is MergeGuard?
+Built for the [Mistral Worldwide Hackathon 2026](https://mistral.ai) — targeting the **"Best Use of Agent Skills"** award.
 
-A multi-agent code review pipeline using the **Mistral Agents API** with **Handoffs**.
+MergeGuard orchestrates 4 specialized AI agents that review pull requests end-to-end: from analyzing the diff, to reviewing each change, verifying suggestions with real code execution, and producing a structured final report. The agents communicate through Mistral's native **Handoffs** mechanism — no external orchestrator needed.
 
-4 agents in a chain:
-1. **Planner** (mistral-large) — Reads PR diff, decomposes into reviewable chunks
-2. **Reviewer** (mistral-large) — Line-by-line code analysis with function calling
-3. **Verifier** (devstral) — Runs linting/tests via code_interpreter
-4. **Reporter** (mistral-large) — Aggregates findings into structured JSON verdict
+---
 
-## Prep Documents
+## Architecture
 
-| Document | Description |
-|----------|-------------|
-| [ARCHITECTURE.md](./ARCHITECTURE.md) | System overview, data flow, tech stack |
-| [AGENT_CONFIGS.md](./AGENT_CONFIGS.md) | Draft agent configurations (model, tools, instructions) |
-| [SCHEMAS.md](./SCHEMAS.md) | Function calling schemas + Reporter JSON verdict schema |
-| [FRONTEND_PLAN.md](./FRONTEND_PLAN.md) | Next.js dashboard wireframes and component plan |
-| [DEMO_PR_PLAN.md](./DEMO_PR_PLAN.md) | Demo PR with planted issues for the live demo |
-| [SPRINT_PLAN.md](./SPRINT_PLAN.md) | 48h sprint timeline with phases and risk mitigation |
-| [API_NOTES.md](./API_NOTES.md) | Study notes from Mistral Agents API documentation |
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                        MergeGuard Pipeline                         │
+│                                                                     │
+│   PR URL / Diff                                                     │
+│        │                                                            │
+│        ▼                                                            │
+│  ┌───────────┐   handoff   ┌────────────┐   handoff   ┌──────────┐│
+│  │  PLANNER  │ ──────────► │  REVIEWER   │ ──────────► │ VERIFIER ││
+│  │   Agent   │             │   Agent     │             │  Agent   ││
+│  └───────────┘             └────────────┘             └──────────┘│
+│        │                         │                          │      │
+│   Uses:                     Uses:                      Uses:      │
+│   • fetch_pr_diff           • read_file                • code_    │
+│   • list_changed_files      • check_style                interpreter│
+│                                                             │      │
+│                                                    handoff  │      │
+│                                                             ▼      │
+│                                                      ┌──────────┐ │
+│                                                      │ REPORTER │ │
+│                                                      │  Agent   │ │
+│                                                      └──────────┘ │
+│                                                             │      │
+│                                                        Uses:      │
+│                                                   • structured    │
+│                                                     JSON output   │
+│                                                             │      │
+│                                                             ▼      │
+│                                                    ┌──────────────┐│
+│                                                    │ ReviewReport ││
+│                                                    │    (JSON)    ││
+│                                                    └──────────────┘│
+└─────────────────────────────────────────────────────────────────────┘
+```
 
-## Mistral Features Showcased (7)
+### Handoff Flow
 
-1. Agents API (beta)
-2. Handoffs (4-agent chain)
-3. Function Calling (get_file_context, get_blame, get_pr_comments)
-4. Code Interpreter (Verifier runs linting/tests)
-5. Structured Output (Reporter JSON verdict)
-6. Web Search (Reviewer checks CVE databases)
-7. Devstral model (Verifier agent)
+```
+Planner ──► Reviewer ──► Verifier ──► Reporter ──► Structured JSON Report
+   │            │             │             │
+   │            │             │             └─ response_format (JSON schema)
+   │            │             └─ code_interpreter (lint, test snippets)
+   │            └─ function tools (read_file, check_style)
+   └─ function tools (fetch_pr_diff, list_changed_files)
+```
 
-## Target Awards
+## Mistral Features Used
 
-- 🏆 **Best Use of Agent Skills** — Special award
-- 🥇 **Online 1st Place** — $1.5K + $3K credits
-- 🌍 **Global Winner** — $10K + $15K credits
+| Feature | Where |
+|---|---|
+| **Agents API** | All 4 agents created via `client.beta.agents.create()` |
+| **Handoffs** | Chain: Planner → Reviewer → Verifier → Reporter |
+| **Function Calling** | `fetch_pr_diff`, `read_file`, `list_changed_files`, `check_style` |
+| **Code Interpreter** | Verifier agent runs linting & test snippets |
+| **Structured Output** | Reporter agent uses `response_format` with JSON schema |
+| **Devstral Model** | Code-optimized model for all agents |
 
-## Hackathon
+## Quick Start
 
-- **Event:** Mistral AI Worldwide Hackathon 2026
-- **Dates:** Feb 28–Mar 1, 2026
-- **Format:** Online track
+```bash
+# Install dependencies
+uv sync
+
+# Run a review (scaffold — no actual API calls yet)
+uv run python -m mergeguard --pr https://github.com/owner/repo/pull/123
+
+# Or with a local diff
+uv run python -m mergeguard --diff path/to/changes.diff
+```
+
+## Project Structure
+
+```
+├── agents/                # Agent system prompts
+│   ├── planner.md
+│   ├── reviewer.md
+│   ├── verifier.md
+│   └── reporter.md
+├── docs/
+│   └── architecture.md   # Detailed architecture doc
+├── src/mergeguard/
+│   ├── __init__.py
+│   ├── main.py            # CLI entry point
+│   ├── agents.py          # Agent creation functions
+│   ├── handoffs.py        # Handoff chain setup
+│   ├── tools.py           # Function tool definitions
+│   └── schemas.py         # Pydantic models for structured output
+├── pyproject.toml
+└── README.md
+```
+
+## License
+
+MIT
